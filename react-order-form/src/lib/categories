@@ -1,0 +1,35 @@
+export type Material = { name: string; factor: number }
+export type Category = { category: string; materials: Material[] }
+
+export const CATEGORIES: Category[] = [
+  {
+    category: 'Điện lạnh',
+    materials: [
+      { name: 'Kim loại', factor: 200 },
+      { name: 'Nhựa', factor: 150 },
+      { name: 'Thủy tinh', factor: 220 },
+    ],
+  },
+  {
+    category: 'Đồ gỗ nội thất',
+    materials: [
+      { name: 'Gỗ tự nhiên', factor: 160 },
+      { name: 'Gỗ/MDF', factor: 150 },
+    ],
+  },
+  {
+    category: 'Quần áo',
+    materials: [
+      { name: 'Cotton', factor: 100 },
+      { name: 'Da', factor: 120 },
+      { name: 'Vải tổng hợp', factor: 110 },
+    ],
+  },
+  {
+    category: 'Hàng dễ vỡ',
+    materials: [
+      { name: 'Gốm/Sứ', factor: 220 },
+      { name: 'Kính', factor: 220 },
+    ],
+  },
+]
