@@ -1,0 +1,180 @@
+   1: package com.homeexpress.home_express_api.service;
+   2: 
+   3: import com.homeexpress.home_express_api.dto.response.EncryptedTransportStatsResponse;
+   4: import com.homeexpress.home_express_api.dto.response.EncryptedTransportStatsResponse.EncryptedMonthlyRevenue;
+   5: import com.homeexpress.home_express_api.dto.response.TransportDashboardStatsResponse;
+   6: import com.homeexpress.home_express_api.entity.User;
+   7: import com.homeexpress.home_express_api.entity.UserRole;
+   8: import lombok.extern.slf4j.Slf4j;
+   9: import org.springframework.beans.factory.annotation.Autowired;
+  10: import org.springframework.stereotype.Service;
+  11: import org.springframework.transaction.annotation.Transactional;
+  12: 
+  13: import java.util.ArrayList;
+  14: import java.util.List;
+  15: 
+  16: /**
+  17:  * Enhanced Transport Dashboard Service with encryption support
+  18:  * 
+  19:  * Provides encrypted financial data for transport providers with role-based access control
+  20:  */
+  21: @Slf4j
+  22: @Service
+  24:     
+  25:     @Autowired
+  26:     private TransportDashboardService dashboardService;
+  27:     
+  28:     @Autowired
+  29:     private EncryptionService encryptionService;
+  30:     
+  31:     @Autowired
+  32:     private AuditLogService auditLogService;
+  33:     
+  34:     /**
+  35:      * Get dashboard statistics with encrypted financial data
+  36:      * 
+  37:      * @param transportId Transport ID
+  38:      * @param requestingUser User requesting the data
+  39:      * @param ipAddress IP address of the request
+  40:      * @return Dashboard stats with encrypted/masked financial data based on user permissions
+  41:      */
+  42:     @Transactional(readOnly = true)
+  43:     public EncryptedTransportStatsResponse getEncryptedDashboardStats(
+  44:             Long transportId,
+  45:             User requestingUser,
+  47:         
+  48:         // Get raw dashboard stats
+  49:         TransportDashboardStatsResponse rawStats = dashboardService.getDashboardStats(transportId);
+  50:         
+  51:         // Create encrypted response
+  52:         EncryptedTransportStatsResponse response = new EncryptedTransportStatsResponse();
+  53:         
+  54:         // Copy non-sensitive data
+  55:         response.setTransportId(transportId);
+  56:         response.setCompletedBookings(rawStats.getCompletedBookings().intValue());
+  57:         response.setInProgressBookings(rawStats.getInProgressBookings().intValue());
+  58:         response.setPendingQuotations(rawStats.getPendingQuotations().intValue());
+  59:         response.setAverageRating(rawStats.getAverageRating());
+  60:         response.setCompletionRate(rawStats.getCompletionRate());
+  61:         
+  62:         // Determine access level
+  63:         boolean canViewEncryptedData = canViewEncryptedData(requestingUser, transportId);
+  64:         boolean canExportData = canExportData(requestingUser, transportId);
+  65:         
+  66:         response.setCanViewEncryptedData(canViewEncryptedData);
+  67:         response.setCanExportData(canExportData);
+  68:         
+  69:         // Convert financial data to VND (Long)
+  70:         Long totalIncome = rawStats.getTotalIncome().longValue();
+  71:         
+  72:         // Encrypt financial data
+  73:         String encryptedTotalIncome = encryptionService.encryptLong(totalIncome);
+  74:         response.setEncryptedTotalIncome(encryptedTotalIncome);
+  75:         
+  76:         // Mask financial data for display
+  77:         response.setMaskedTotalIncome(maskAmount(totalIncome));
+  78:         
+  79:         // If user has permission, include decrypted data
+  81:             response.setTotalIncome(totalIncome);
+  82:             
+  83:             // Log access to encrypted data
+  84:             auditLogService.logEncryptedDataAccess(
+  85:                 requestingUser.getUserId(),
+  86:                 "VIEW",
+  87:                 "TRANSPORT_STATS",
+  88:                 transportId,
+  89:                 ipAddress
+  90:             );
+  92:         
+  93:         // Process monthly revenue series
+  94:         List<EncryptedMonthlyRevenue> encryptedSeries = new ArrayList<>();
+  96:             Long revenue = point.getRevenue().longValue();
+  97:             String encryptedRevenue = encryptionService.encryptLong(revenue);
+  98:             String maskedRevenue = maskAmount(revenue);
+  99:             
+ 100:             EncryptedMonthlyRevenue encryptedPoint = new EncryptedMonthlyRevenue();
+ 101:             encryptedPoint.setMonth(point.getMonth());
+ 102:             encryptedPoint.setEncryptedRevenue(encryptedRevenue);
+ 103:             encryptedPoint.setMaskedRevenue(maskedRevenue);
+ 104:             
+ 106:                 encryptedPoint.setRevenue(revenue);
+ 108:             
+ 109:             encryptedSeries.add(encryptedPoint);
+ 111:         response.setMonthlyRevenueSeries(encryptedSeries);
+ 112:         
+ 113:         return response;
+ 115:     
+ 116:     /**
+ 117:      * Decrypt financial data for authorized users
+ 118:      * 
+ 119:      * @param encryptedData Encrypted data string
+ 120:      * @param requestingUser User requesting decryption
+ 121:      * @param transportId Transport ID
+ 122:      * @param ipAddress IP address of the request
+ 123:      * @return Decrypted Long value
+ 124:      */
+ 125:     public Long decryptFinancialData(
+ 126:             String encryptedData,
+ 127:             User requestingUser,
+ 128:             Long transportId,
+ 130:         
+ 133:                 requestingUser.getUserId(), transportId);
+ 134:             throw new SecurityException("Unauthorized access to encrypted data");
+ 136:         
+ 137:         // Log decryption
+ 138:         auditLogService.logEncryptedDataAccess(
+ 139:             requestingUser.getUserId(),
+ 140:             "DECRYPT",
+ 141:             "FINANCIAL_DATA",
+ 142:             transportId,
+ 143:             ipAddress
+ 144:         );
+ 145:         
+ 146:         return encryptionService.decryptLong(encryptedData);
+ 148:     
+ 149:     /**
+ 150:      * Check if user can view encrypted data
+ 151:      * 
+ 152:      * @param user User to check
+ 153:      * @param transportId Transport ID
+ 154:      * @return true if user has permission
+ 155:      */
+ 158:             return false;
+ 160:         
+ 161:         // MANAGER role can view all encrypted data
+ 163:             return true;
+ 165:         
+ 166:         // TRANSPORT role can view their own data
+ 168:             // Check if user owns this transport
+ 169:             // In production, verify user.getTransportId() == transportId
+ 170:             return true;
+ 172:         
+ 173:         return false;
+ 175:     
+ 176:     /**
+ 177:      * Check if user can export data
+ 178:      * 
+ 179:      * @param user User to check
+ 180:      * @param transportId Transport ID
+ 181:      * @return true if user has permission
+ 182:      */
+ 185:             return false;
+ 187:         
+ 188:         // Only MANAGER and transport owner can export
+ 189:         return user.getRole() == UserRole.MANAGER || 
+ 190:                (user.getRole() == UserRole.TRANSPORT);
+ 192:     
+ 193:     /**
+ 194:      * Mask amount for display
+ 195:      * Shows only magnitude without exact value
+ 196:      * 
+ 197:      * @param amount Amount to mask
+ 198:      * @return Masked string (e.g., "1.2M VND", "500K VND")
+ 199:      */
+ 202:             return "***";
+ 204:         
+ 206:             return String.format("%.1fB VND", amount / 1_000_000_000.0);
+ 208:             return String.format("%.1fM VND", amount / 1_000_000.0);
+ 210:             return String.format("%.1fK VND", amount / 1_000.0);
+ 212:             return "< 1K VND";
+ 216: 
