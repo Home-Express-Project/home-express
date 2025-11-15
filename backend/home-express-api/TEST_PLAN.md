@@ -1,12 +1,9 @@
 # KẾ HOẠCH UNIT TEST - LUỒNG CHÍNH
-**Ngày tạo:** 2025-12-15  
-**Mục đích:** Viết lại unit tests cho happy case của luồng chính (bảo vệ đồ án)
+**Ngày tạo:** 2025-12-15  
 
----
+## **TỔNG QUAN**
 
-## 📋 **TỔNG QUAN**
-
-### ✅ **Modules cần test (theo thứ tự luồng):**
+### **Modules cần test (theo thứ tự luồng):**
 1. **Authentication & OTP** - Đăng ký & Đăng nhập
 2. **Booking Flow** - 8 giai đoạn booking
 3. **AI Detection** - Phân tích AI
@@ -17,7 +14,7 @@
 8. **Dispute** - Tranh chấp
 9. **Admin Dashboard** - Thống kê
 
-### 🎯 **Chiến lược test:**
+### **Chiến lược test:**
 - **Unit tests only** (mock dependencies)
 - **Happy case first** (luồng thành công)
 - **JUnit 5 + Mockito**
@@ -25,7 +22,7 @@
 
 ---
 
-## 📝 **CHI TIẾT UNIT TESTS**
+## **CHI TIẾT UNIT TESTS**
 
 ### **1. AuthServiceTest.java** 
 **Package:** `service`  
