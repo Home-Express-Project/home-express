@@ -9,52 +9,53 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Post-processing service for detected items
- * - Aggregates similar items across multiple images
- * - Normalizes Vietnamese item names
- * - Maps categories to Vietnamese categories
- * - Improves quantity detection
+ * Service hậu xử lý (Post-processing) sau khi nhận diện đồ vật.
+ * Nhiệm vụ:
+ * - Gộp các món giống nhau (nếu quét từ nhiều ảnh).
+ * - Chuẩn hóa tên tiếng Việt.
+ * - Mapping danh mục về chuẩn của hệ thống.
+ * - Cải thiện độ chính xác của số lượng (tách combo).
  */
 @Slf4j
 @Service
 public class ItemDetectionPostProcessor {
 
     /**
-     * Process and aggregate detected items
-     * - Breaks down sets into individual items
-     * - Merges similar items from different images
-     * - Normalizes names and categories
-     * - Updates quantities
+     * Hàm xử lý chính: Gộp và làm sạch danh sách đồ vật.
+     * Quy trình:
+     * 1. Tách các bộ (Set) thành món lẻ.
+     * 2. Chuẩn hóa tên, danh mục và tính kích thước.
+     * 3. Gộp các món trùng nhau lại.
      */
     public List<ItemCandidateDto> processAndAggregate(List<ItemCandidateDto> candidates) {
         if (candidates == null || candidates.isEmpty()) {
             return List.of();
         }
 
-        log.info("Post-processing {} candidate items", candidates.size());
+        log.info("Bắt đầu hậu xử lý cho {} món đồ tiềm năng", candidates.size());
 
-        // Step 1: Break down sets into individual items (e.g., "Bộ bàn ghế" → "Bàn ăn" + "Ghế ăn")
+        // Bước 1: Tách combo (VD: "Bộ bàn ghế" → "Bàn ăn" + "Ghế ăn")
         List<ItemCandidateDto> expanded = expandSets(candidates);
 
-        // Step 2: Normalize names and categories, calculate size
+        // Bước 2: Chuẩn hóa tên, danh mục và tính lại kích thước (S/M/L)
         List<ItemCandidateDto> normalized = expanded.stream()
             .map(this::normalizeItem)
             .map(this::calculateSize)
             .collect(Collectors.toList());
 
-        // Step 3: Aggregate similar items
+        // Bước 3: Gộp các món tương tự nhau lại (tránh trùng lặp)
         List<ItemCandidateDto> aggregated = aggregateSimilarItems(normalized);
 
-        log.info("Post-processing complete: {} items after expansion and aggregation", aggregated.size());
+        log.info("Hậu xử lý hoàn tất: Từ {} món -> còn {} món sau khi gộp.", candidates.size(), aggregated.size());
 
         return aggregated;
     }
 
     /**
-     * Expand sets into individual items
-     * Examples:
-     * - "Bộ bàn ghế" (1 table + 4 chairs) → "Bàn ăn" (1) + "Ghế ăn" (4)
-     * - "Dining Set" → "Dining Table" + "Dining Chairs"
+     * Tách các bộ (Set) thành từng món riêng lẻ để tính giá chính xác hơn.
+     * Ví dụ:
+     * - "Bộ bàn ghế" (1 bàn + 4 ghế) → "Bàn ăn" (1) + "Ghế ăn" (4)
+     * - "Sofa set" → "Sofa" + "Bàn trà"
      */
     private List<ItemCandidateDto> expandSets(List<ItemCandidateDto> items) {
         if (items == null || items.isEmpty()) {
@@ -70,12 +71,12 @@ public class ItemDetectionPostProcessor {
 
             String name = item.getName().toLowerCase();
             
-            // Check if this is a set that needs to be broken down
+            // Kiểm tra xem có phải là bộ (Set) không
             if (isSetItem(name)) {
                 List<ItemCandidateDto> setItems = breakDownSet(item);
                 expanded.addAll(setItems);
             } else {
-                // Not a set, keep as is
+                // Không phải bộ thì giữ nguyên
                 expanded.add(item);
             }
         }
@@ -84,7 +85,7 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Check if an item name represents a set
+     * Kiểm tra xem tên món đồ có phải là một bộ (Set) hay không.
      */
     private boolean isSetItem(String name) {
         if (name == null || name.isBlank()) {
@@ -103,13 +104,13 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Break down a set item into individual items
+     * Logic tách bộ thành các món lẻ.
      */
     private List<ItemCandidateDto> breakDownSet(ItemCandidateDto setItem) {
         List<ItemCandidateDto> items = new ArrayList<>();
         String name = setItem.getName().toLowerCase();
 
-        // Extract metadata to pass to individual items
+        // Sao chép metadata để các món con cũng có thông tin gốc
         Map<String, Object> baseMetadata = new HashMap<>();
         if (setItem.getMetadata() instanceof Map) {
             @SuppressWarnings("unchecked")
@@ -120,36 +121,34 @@ public class ItemDetectionPostProcessor {
         baseMetadata.put("originalSetName", setItem.getName());
 
         if (name.contains("bộ bàn ghế") || name.contains("dining set")) {
-            // Dining set: 1 table + N chairs (typically 4-6)
-            // Try to extract chair count from name or metadata, default to 4
+            // Bộ bàn ăn: 1 bàn + N ghế (mặc định 4)
             int chairCount = extractChairCount(setItem, 4);
 
-            // Create dining table
+            // Tạo bàn ăn
             items.add(createItemFromSet(
                 setItem, "Bàn ăn", "furniture", "dining_table", 1, baseMetadata));
 
-            // Create dining chairs
+            // Tạo ghế ăn
             items.add(createItemFromSet(
                 setItem, "Ghế ăn", "furniture", "dining_chair", chairCount, baseMetadata));
 
         } else if (name.contains("sofa set")) {
-            // Sofa set: 1 sofa + 1 coffee table + possibly side tables
+            // Bộ sofa: 1 sofa + 1 bàn trà
             items.add(createItemFromSet(
                 setItem, "Sofa", "furniture", "sofa", 1, baseMetadata));
             items.add(createItemFromSet(
                 setItem, "Bàn trà", "furniture", "coffee_table", 1, baseMetadata));
             
         } else if (name.contains("bedroom set")) {
-            // Bedroom set: 1 bed + 2 nightstands + possibly dresser/wardrobe
+            // Bộ phòng ngủ: 1 giường + 2 tủ đầu giường
             items.add(createItemFromSet(
                 setItem, "Giường", "furniture", "bed_frame", 1, baseMetadata));
             items.add(createItemFromSet(
                 setItem, "Tủ đầu giường", "furniture", "nightstand", 2, baseMetadata));
             
         } else {
-            // Generic furniture set - try to infer from context
-            // For now, keep as is but mark as processed
-            log.warn("Unknown set type: {}. Keeping as single item.", setItem.getName());
+            // Nếu không biết loại set gì thì log warning và giữ nguyên
+            log.warn("Không rõ loại set: {}. Giữ nguyên như cũ.", setItem.getName());
             items.add(setItem);
         }
 
@@ -157,10 +156,10 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Extract chair count from item name or metadata
+     * Cố gắng đoán số lượng ghế từ tên hoặc metadata (VD: "Bộ bàn ghế 6 chỗ" → 6).
      */
     private int extractChairCount(ItemCandidateDto item, int defaultValue) {
-        // Check metadata first
+        // Kiểm tra metadata trước
         if (item.getMetadata() instanceof Map) {
             @SuppressWarnings("unchecked")
             Map<String, Object> metadata = (Map<String, Object>) item.getMetadata();
@@ -170,7 +169,7 @@ public class ItemDetectionPostProcessor {
             }
         }
 
-        // Try to extract from name (e.g., "Bộ bàn ghế 6 chỗ" → 6)
+        // Thử tìm trong tên
         String name = item.getName();
         if (name != null) {
             java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(\\d+)\\s*(chỗ|chair|ghế)");
@@ -179,7 +178,7 @@ public class ItemDetectionPostProcessor {
                 try {
                     return Integer.parseInt(matcher.group(1));
                 } catch (NumberFormatException e) {
-                    // Ignore
+                    // Bỏ qua nếu lỗi parse số
                 }
             }
         }
@@ -188,7 +187,7 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Create an individual item from a set item
+     * Hàm helper để tạo món con từ set mẹ.
      */
     private ItemCandidateDto createItemFromSet(
             ItemCandidateDto setItem, 
@@ -222,7 +221,7 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Normalize item name and category (Vietnamese support)
+     * Chuẩn hóa tên và danh mục món đồ (Hỗ trợ tiếng Việt).
      */
     private ItemCandidateDto normalizeItem(ItemCandidateDto item) {
         if (item == null || item.getName() == null) {
@@ -233,7 +232,7 @@ public class ItemDetectionPostProcessor {
         String normalizedName = normalizeVietnameseName(originalName);
         String normalizedCategory = normalizeCategory(item.getCategoryName(), normalizedName);
 
-        // Update item if name/category changed
+        // Nếu tên hoặc danh mục thay đổi thì cập nhật lại object
         if (!originalName.equals(normalizedName) || 
             (item.getCategoryName() != null && !item.getCategoryName().equals(normalizedCategory))) {
             
@@ -254,7 +253,7 @@ public class ItemDetectionPostProcessor {
                 .imageUrl(item.getImageUrl())
                 .notes(item.getNotes());
 
-            // Preserve metadata and add normalization info
+            // Giữ lại metadata và đánh dấu là đã chuẩn hóa
             Map<String, Object> metadata = new HashMap<>();
             if (item.getMetadata() instanceof Map) {
                 @SuppressWarnings("unchecked")
@@ -272,7 +271,8 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Normalize Vietnamese item names to standard format
+     * Chuẩn hóa tên tiếng Việt (VD: "tủ lạnh" -> "Tủ lạnh").
+     * Có map sẵn một số từ khóa phổ biến.
      */
     private String normalizeVietnameseName(String name) {
         if (name == null || name.isBlank()) {
@@ -281,7 +281,7 @@ public class ItemDetectionPostProcessor {
 
         String normalized = name.trim();
 
-        // Vietnamese to English mapping
+        // Map từ khóa tiếng Việt
         Map<String, String> vietnameseMap = Map.ofEntries(
             Map.entry("tủ lạnh", "Tủ lạnh"),
             Map.entry("tủ lạnh samsung", "Tủ lạnh Samsung"),
@@ -308,7 +308,7 @@ public class ItemDetectionPostProcessor {
         String lowerName = normalized.toLowerCase();
         for (Map.Entry<String, String> entry : vietnameseMap.entrySet()) {
             if (lowerName.contains(entry.getKey())) {
-                // Preserve brand/model if present
+                // Giữ lại tên hãng/model nếu có
                 String brandModel = extractBrandModel(normalized);
                 if (brandModel != null && !brandModel.isEmpty()) {
                     return entry.getValue() + " " + brandModel;
@@ -317,7 +317,7 @@ public class ItemDetectionPostProcessor {
             }
         }
 
-        // Capitalize first letter if all lowercase
+        // Viết hoa chữ cái đầu nếu đang viết thường toàn bộ
         if (normalized.equals(normalized.toLowerCase()) && normalized.length() > 0) {
             return normalized.substring(0, 1).toUpperCase() + normalized.substring(1);
         }
@@ -326,14 +326,14 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Extract brand/model from name
+     * Bóc tách tên thương hiệu/model từ tên sản phẩm.
      */
     private String extractBrandModel(String name) {
         if (name == null || name.isBlank()) {
             return null;
         }
 
-        // Common brand patterns
+        // Các thương hiệu phổ biến
         String[] brands = {"Samsung", "LG", "Sony", "Panasonic", "TCL", "Sharp", 
                           "Toshiba", "IKEA", "Xiaomi", "Electrolux", "Bosch", "Whirlpool"};
         
@@ -343,7 +343,7 @@ public class ItemDetectionPostProcessor {
             }
         }
 
-        // Check for model numbers (e.g., "RT35K", "UN55TU7000")
+        // Tìm các mã model (có số trong tên)
         String[] parts = name.split("\\s+");
         for (String part : parts) {
             if (part.matches(".*\\d+.*") && part.length() >= 3) {
@@ -355,14 +355,14 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Normalize category to Vietnamese category system
+     * Chuẩn hóa danh mục về bộ danh mục tiếng Việt của hệ thống.
      */
     private String normalizeCategory(String category, String itemName) {
         if (category == null) {
             category = inferCategoryFromName(itemName);
         }
 
-        // Map English categories to Vietnamese categories used in the system
+        // Map danh mục tiếng Anh -> Tiếng Việt
         Map<String, String> categoryMap = Map.of(
             "furniture", "Nội thất",
             "appliance", "Điện tử",
@@ -376,7 +376,7 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Infer category from item name
+     * Đoán danh mục từ tên sản phẩm (nếu AI không trả về danh mục).
      */
     private String inferCategoryFromName(String name) {
         if (name == null || name.isBlank()) {
@@ -385,22 +385,22 @@ public class ItemDetectionPostProcessor {
 
         String lowerName = name.toLowerCase();
 
-        // Furniture keywords
+        // Từ khóa Nội thất
         if (lowerName.matches(".*(sofa|bàn|ghế|giường|tủ|kệ|tủ quần áo|tủ sách|bộ bàn ghế).*")) {
             return "furniture";
         }
 
-        // Appliance keywords
+        // Từ khóa Điện lạnh
         if (lowerName.matches(".*(tủ lạnh|máy giặt|máy sấy|điều hòa|lò vi sóng|máy rửa chén).*")) {
             return "appliance";
         }
 
-        // Electronics keywords
+        // Từ khóa Điện tử
         if (lowerName.matches(".*(tivi|tv|máy tính|laptop|monitor|màn hình|printer|loa|speaker).*")) {
             return "electronics";
         }
 
-        // Box keywords
+        // Từ khóa Hộp/Thùng
         if (lowerName.matches(".*(thùng|box|carton|container|crate).*")) {
             return "box";
         }
@@ -409,14 +409,15 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Aggregate similar items (same name and category) from different images
+     * Gộp các món đồ giống hệt nhau (cùng tên, cùng danh mục).
+     * Thường dùng khi quét nhiều ảnh và phát hiện trùng lặp.
      */
     private List<ItemCandidateDto> aggregateSimilarItems(List<ItemCandidateDto> items) {
         if (items == null || items.isEmpty()) {
             return List.of();
         }
 
-        // Group by normalized name and category
+        // Nhóm theo Tên + Danh mục
         Map<String, List<ItemCandidateDto>> grouped = items.stream()
             .collect(Collectors.groupingBy(item -> {
                 String name = item.getName() != null ? item.getName().toLowerCase().trim() : "";
@@ -428,10 +429,10 @@ public class ItemDetectionPostProcessor {
 
         for (List<ItemCandidateDto> group : grouped.values()) {
             if (group.size() == 1) {
-                // Single item, no aggregation needed
+                // Có 1 món thì không cần gộp
                 aggregated.add(group.get(0));
             } else {
-                // Aggregate multiple similar items
+                // Có nhiều món trùng tên -> Gộp lại
                 ItemCandidateDto aggregatedItem = aggregateItemGroup(group);
                 aggregated.add(aggregatedItem);
             }
@@ -441,7 +442,10 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Aggregate a group of similar items into one
+     * Logic gộp 1 nhóm item thành 1 item duy nhất.
+     * - Cộng dồn số lượng.
+     * - Lấy độ tin cậy trung bình.
+     * - Lấy kích thước/cân nặng lớn nhất (an toàn).
      */
     private ItemCandidateDto aggregateItemGroup(List<ItemCandidateDto> group) {
         if (group == null || group.isEmpty()) {
@@ -452,29 +456,29 @@ public class ItemDetectionPostProcessor {
             return group.get(0);
         }
 
-        // Use the first item as base
+        // Lấy item đầu tiên làm gốc
         ItemCandidateDto base = group.get(0);
 
-        // Sum quantities
+        // Cộng tổng số lượng
         int totalQuantity = group.stream()
             .mapToInt(item -> item.getQuantity() != null ? item.getQuantity() : 1)
             .sum();
 
-        // Average confidence
+        // Tính độ tin cậy trung bình
         double avgConfidence = group.stream()
             .filter(item -> item.getConfidence() != null)
             .mapToDouble(ItemCandidateDto::getConfidence)
             .average()
             .orElse(base.getConfidence() != null ? base.getConfidence() : 0.8);
 
-        // Use highest weight (if available)
+        // Lấy cân nặng lớn nhất (để tính giá cho chắc ăn)
         Double maxWeight = group.stream()
             .map(ItemCandidateDto::getWeightKg)
             .filter(Objects::nonNull)
             .max(Comparator.comparingDouble(weight -> weight != null ? weight : 0.0))
             .orElse(null);
 
-        // Use largest dimensions (if available)
+        // Lấy kích thước lớn nhất
         ItemCandidateDto.DimensionsDto maxDims = group.stream()
             .map(ItemCandidateDto::getDimensions)
             .filter(Objects::nonNull)
@@ -487,7 +491,7 @@ public class ItemDetectionPostProcessor {
             }))
             .orElse(null);
 
-        // Combine metadata
+        // Gộp metadata lại
         Map<String, Object> combinedMetadata = new HashMap<>();
         if (base.getMetadata() instanceof Map) {
             @SuppressWarnings("unchecked")
@@ -528,25 +532,25 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Calculate size (S, M, L) based on weight and dimensions
-     * Rules from frontend:
-     * - S: weight < 20kg or volume < 0.25 m³
-     * - M: weight 20-50kg or volume 0.25-0.85 m³
-     * - L: weight > 50kg or volume > 0.85 m³
+     * Tính size (S, M, L) dựa trên cân nặng và thể tích.
+     * Quy tắc (từ frontend):
+     * - S: < 20kg hoặc < 0.25 m³
+     * - M: 20-50kg hoặc 0.25-0.85 m³
+     * - L: > 50kg hoặc > 0.85 m³
      */
     private ItemCandidateDto calculateSize(ItemCandidateDto item) {
         if (item == null) {
             return item;
         }
 
-        // If size already set, keep it
+        // Nếu đã có size rồi thì giữ nguyên
         if (item.getSize() != null && !item.getSize().isBlank()) {
             return item;
         }
 
-        String calculatedSize = "M"; // Default
+        String calculatedSize = "M"; // Mặc định
 
-        // Calculate volume in m³
+        // Tính thể tích (m3)
         Double volumeM3 = null;
         if (item.getDimensions() != null) {
             Double width = item.getDimensions().getWidthCm();
@@ -554,11 +558,11 @@ public class ItemDetectionPostProcessor {
             Double depth = item.getDimensions().getDepthCm();
             
             if (width != null && height != null && depth != null) {
-                volumeM3 = (width * height * depth) / 1_000_000.0; // Convert cm³ to m³
+                volumeM3 = (width * height * depth) / 1_000_000.0; // Đổi cm3 sang m3
             }
         }
 
-        // Determine size based on weight first, then volume
+        // Ưu tiên tính theo cân nặng trước, sau đó đến thể tích
         Double weightKg = item.getWeightKg();
         if (weightKg != null) {
             if (weightKg < 20) {
@@ -569,7 +573,6 @@ public class ItemDetectionPostProcessor {
                 calculatedSize = "L";
             }
         } else if (volumeM3 != null) {
-            // Use volume if weight not available
             if (volumeM3 < 0.25) {
                 calculatedSize = "S";
             } else if (volumeM3 <= 0.85) {
@@ -578,11 +581,11 @@ public class ItemDetectionPostProcessor {
                 calculatedSize = "L";
             }
         } else {
-            // If neither weight nor dimensions available, infer from category
+            // Nếu không có số liệu gì thì đoán theo tên/danh mục
             calculatedSize = inferSizeFromCategory(item.getCategoryName(), item.getName());
         }
 
-        // Update item with calculated size
+        // Cập nhật size vào item
         if (!calculatedSize.equals(item.getSize())) {
             return ItemCandidateDto.builder()
                 .id(item.getId())
@@ -608,7 +611,7 @@ public class ItemDetectionPostProcessor {
     }
 
     /**
-     * Infer size from category and name when weight/dimensions unavailable
+     * Đoán size dựa trên tên nếu không có thông số nào khác.
      */
     private String inferSizeFromCategory(String category, String name) {
         if (category == null && name == null) {
@@ -618,7 +621,7 @@ public class ItemDetectionPostProcessor {
         String lowerName = name != null ? name.toLowerCase() : "";
         String lowerCategory = category != null ? category.toLowerCase() : "";
 
-        // Large items
+        // Đồ lớn (L)
         if (lowerName.contains("tủ lạnh") || lowerName.contains("refrigerator") ||
             lowerName.contains("máy giặt") || lowerName.contains("washing machine") ||
             lowerName.contains("giường") || lowerName.contains("bed") ||
@@ -628,7 +631,7 @@ public class ItemDetectionPostProcessor {
             return "L";
         }
 
-        // Small items
+        // Đồ nhỏ (S)
         if (lowerName.contains("ghế") || lowerName.contains("chair") ||
             lowerName.contains("bàn trà") || lowerName.contains("coffee table") ||
             lowerCategory.contains("box") ||
@@ -636,8 +639,7 @@ public class ItemDetectionPostProcessor {
             return "S";
         }
 
-        // Medium items (default)
+        // Mặc định trung bình (M)
         return "M";
     }
 }
-

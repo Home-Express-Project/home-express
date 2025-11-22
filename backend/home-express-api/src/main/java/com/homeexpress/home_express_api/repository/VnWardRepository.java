@@ -14,6 +14,8 @@ public interface VnWardRepository extends JpaRepository<VnWardRepository.VnWard,
 
     List<VnWard> findByDistrictCodeOrderByWardNameAsc(String districtCode);
 
+    java.util.Optional<VnWard> findFirstByWardNameContainingIgnoreCaseAndDistrictCode(String wardName, String districtCode);
+
     @Entity
     @Table(name = "vn_wards")
     class VnWard {

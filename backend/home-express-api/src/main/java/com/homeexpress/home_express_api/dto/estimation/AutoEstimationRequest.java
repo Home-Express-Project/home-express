@@ -1,5 +1,6 @@
 package com.homeexpress.home_express_api.dto.estimation;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -40,6 +41,18 @@ public class AutoEstimationRequest {
 
     @JsonProperty("pickup_datetime")
     private String pickupDatetime;
+
+    @JsonProperty("pickup_lat")
+    private BigDecimal pickupLat;
+
+    @JsonProperty("pickup_lng")
+    private BigDecimal pickupLng;
+
+    @JsonProperty("delivery_lat")
+    private BigDecimal deliveryLat;
+
+    @JsonProperty("delivery_lng")
+    private BigDecimal deliveryLng;
 
     public String getPickupAddress() {
         return pickupAddress;
@@ -103,6 +116,38 @@ public class AutoEstimationRequest {
 
     public void setPickupDatetime(String pickupDatetime) {
         this.pickupDatetime = pickupDatetime;
+    }
+
+    public BigDecimal getPickupLat() {
+        return pickupLat;
+    }
+
+    public void setPickupLat(BigDecimal pickupLat) {
+        this.pickupLat = pickupLat;
+    }
+
+    public BigDecimal getPickupLng() {
+        return pickupLng;
+    }
+
+    public void setPickupLng(BigDecimal pickupLng) {
+        this.pickupLng = pickupLng;
+    }
+
+    public BigDecimal getDeliveryLat() {
+        return deliveryLat;
+    }
+
+    public void setDeliveryLat(BigDecimal deliveryLat) {
+        this.deliveryLat = deliveryLat;
+    }
+
+    public BigDecimal getDeliveryLng() {
+        return deliveryLng;
+    }
+
+    public void setDeliveryLng(BigDecimal deliveryLng) {
+        this.deliveryLng = deliveryLng;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

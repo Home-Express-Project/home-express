@@ -46,39 +46,49 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         try {
             // 1. lay JWT tu Authorization header
             String jwt = getJwtFromRequest(request);
+            logger.info("JWT extracted: " + (jwt != null ? "FOUND" : "NULL"));
             
             // 2. neu co token va valid
-            if (StringUtils.hasText(jwt) && jwtTokenProvider.validateToken(jwt)) {
-                // 3. extract user info tu token
-                Long userId = jwtTokenProvider.getUserIdFromToken(jwt);
-                String role = jwtTokenProvider.getRoleFromToken(jwt);
-                
-                // 4. load user entity based on role
-                Object principal = userId; // default to userId
-                
-                if ("CUSTOMER".equals(role)) {
-                    Optional<Customer> customerOpt = customerRepository.findByUser_UserId(userId);
-                    if (customerOpt.isPresent()) {
-                        principal = customerOpt.get();
+            if (StringUtils.hasText(jwt)) {
+                if (jwtTokenProvider.validateToken(jwt)) {
+                    logger.info("JWT is VALID");
+                    // 3. extract user info tu token
+                    Long userId = jwtTokenProvider.getUserIdFromToken(jwt);
+                    String role = jwtTokenProvider.getRoleFromToken(jwt);
+                    logger.info("User ID: " + userId + ", Role: " + role);
+                    
+                    // 4. load user entity based on role
+                    Object principal = userId; // default to userId
+                    
+                    if ("CUSTOMER".equals(role)) {
+                        Optional<Customer> customerOpt = customerRepository.findByUser_UserId(userId);
+                        if (customerOpt.isPresent()) {
+                            principal = customerOpt.get();
+                        }
+                    } else if ("TRANSPORT".equals(role)) {
+                        Optional<Transport> transportOpt = transportRepository.findByUser_UserId(userId);
+                        if (transportOpt.isPresent()) {
+                            principal = transportOpt.get();
+                        }
                     }
-                } else if ("TRANSPORT".equals(role)) {
-                    Optional<Transport> transportOpt = transportRepository.findByUser_UserId(userId);
-                    if (transportOpt.isPresent()) {
-                        principal = transportOpt.get();
-                    }
+                    
+                    // 5. tao Authentication object
+                    // chu y: authorities phai co prefix "ROLE_" de Spring Security nhan dang
+                    SimpleGrantedAuthority authority = new SimpleGrantedAuthority("ROLE_" + role);
+                    UsernamePasswordAuthenticationToken authentication = 
+                        new UsernamePasswordAuthenticationToken(principal, null, Collections.singletonList(authority));
+                    
+                    // 6. set request details (IP, user agent)
+                    authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                    
+                    // 7. set vao SecurityContext - tu day Spring Security biet user da login
+                    SecurityContextHolder.getContext().setAuthentication(authentication);
+                    logger.info("Authentication set in SecurityContext");
+                } else {
+                    logger.error("JWT is INVALID");
                 }
-                
-                // 5. tao Authentication object
-                // chu y: authorities phai co prefix "ROLE_" de Spring Security nhan dang
-                SimpleGrantedAuthority authority = new SimpleGrantedAuthority("ROLE_" + role);
-                UsernamePasswordAuthenticationToken authentication = 
-                    new UsernamePasswordAuthenticationToken(principal, null, Collections.singletonList(authority));
-                
-                // 6. set request details (IP, user agent)
-                authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                
-                // 7. set vao SecurityContext - tu day Spring Security biet user da login
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+            } else {
+                logger.info("No JWT found in request");
             }
         } catch (Exception ex) {
             // log loi nhung ko throw - de request tiep tuc

@@ -4,6 +4,8 @@ import com.homeexpress.home_express_api.dto.request.SaveItemRequest;
 import com.homeexpress.home_express_api.dto.response.SavedItemResponse;
 import com.homeexpress.home_express_api.entity.SavedItem;
 import com.homeexpress.home_express_api.repository.SavedItemRepository;
+import com.homeexpress.home_express_api.entity.ProductModel;
+import com.homeexpress.home_express_api.service.intake.ProductModelService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -23,6 +25,7 @@ import java.util.stream.Collectors;
 public class SavedItemService {
 
     private final SavedItemRepository savedItemRepository;
+    private final ProductModelService productModelService;
 
     /**
      * Get all saved items for a customer
@@ -42,6 +45,9 @@ public class SavedItemService {
     public SavedItemResponse saveSingleItem(Long customerId, SaveItemRequest request) {
         log.info("Saving item '{}' for customer {}", request.getName(), customerId);
         
+        // Save or update product model if brand/model provided
+        saveProductModelIfPresent(request);
+
         SavedItem item = new SavedItem();
         item.setCustomerId(customerId);
         item.setName(request.getName());
@@ -71,6 +77,9 @@ public class SavedItemService {
         
         List<SavedItem> savedItems = items.stream()
                 .map(request -> {
+                    // Save or update product model if brand/model provided
+                    saveProductModelIfPresent(request);
+
                     SavedItem item = new SavedItem();
                     item.setCustomerId(customerId);
                     item.setName(request.getName());
@@ -101,7 +110,7 @@ public class SavedItemService {
     public void deleteSavedItem(Long itemId, Long customerId) {
         log.info("Deleting saved item {} for customer {}", itemId, customerId);
         
-        SavedItem item = savedItemRepository.findByIdAndCustomerId(itemId, customerId)
+        SavedItem item = savedItemRepository.findBySavedItemIdAndCustomerId(itemId, customerId)
                 .orElseThrow(() -> new IllegalArgumentException("Saved item not found or not authorized"));
         
         savedItemRepository.delete(item);
@@ -115,7 +124,7 @@ public class SavedItemService {
         
         int count = 0;
         for (Long itemId : itemIds) {
-            if (savedItemRepository.findByIdAndCustomerId(itemId, customerId).isPresent()) {
+            if (savedItemRepository.findBySavedItemIdAndCustomerId(itemId, customerId).isPresent()) {
                 savedItemRepository.deleteById(itemId);
                 count++;
             }
@@ -138,7 +147,10 @@ public class SavedItemService {
     public SavedItemResponse updateSavedItem(Long itemId, Long customerId, SaveItemRequest request) {
         log.info("Updating saved item {} for customer {}", itemId, customerId);
         
-        SavedItem item = savedItemRepository.findByIdAndCustomerId(itemId, customerId)
+        // Save or update product model if brand/model provided
+        saveProductModelIfPresent(request);
+
+        SavedItem item = savedItemRepository.findBySavedItemIdAndCustomerId(itemId, customerId)
                 .orElseThrow(() -> new IllegalArgumentException("Saved item not found or not authorized"));
         
         item.setName(request.getName());
@@ -158,6 +170,28 @@ public class SavedItemService {
         
         SavedItem updated = savedItemRepository.save(item);
         return convertToResponse(updated);
+    }
+
+    // Helper method to save product model
+    private void saveProductModelIfPresent(SaveItemRequest request) {
+        if (request.getBrand() != null && !request.getBrand().trim().isEmpty() &&
+            request.getModel() != null && !request.getModel().trim().isEmpty()) {
+            try {
+                ProductModel model = new ProductModel();
+                model.setBrand(request.getBrand());
+                model.setModel(request.getModel());
+                model.setProductName(request.getName());
+                model.setCategoryId(request.getCategoryId());
+                model.setWeightKg(request.getWeightKg());
+                model.setDimensionsMm(request.getDimensions()); // Ensure format matches if needed
+                model.setSource("user_save");
+                
+                productModelService.saveOrUpdateModel(model);
+            } catch (Exception e) {
+                // Log error but don't fail the item save
+                log.warn("Failed to auto-save product model: {}", e.getMessage());
+            }
+        }
     }
 
     // Helper method to convert entity to response DTO

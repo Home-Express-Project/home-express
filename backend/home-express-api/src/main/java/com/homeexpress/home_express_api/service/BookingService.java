@@ -17,6 +17,7 @@ import com.homeexpress.home_express_api.entity.Payment;
 import com.homeexpress.home_express_api.entity.PaymentStatus;
 import com.homeexpress.home_express_api.entity.PaymentType;
 import com.homeexpress.home_express_api.repository.UserRepository;
+import com.homeexpress.home_express_api.service.map.MapService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -75,6 +76,9 @@ public class BookingService {
 
     @Autowired
     private CustomerEventService customerEventService;
+
+    @Autowired
+    private MapService mapService;
 
     @Transactional
     public BookingResponse createBooking(BookingRequest request, Long customerId) {
@@ -370,6 +374,20 @@ public class BookingService {
         double lat2 = delivery.getLat().doubleValue();
         double lon2 = delivery.getLng().doubleValue();
 
+        try {
+            long distanceMeters = mapService.calculateDistanceInMeters(lat1, lon1, lat2, lon2);
+            if (distanceMeters > 0) {
+                double distanceKm = distanceMeters / 1000.0;
+                booking.setDistanceKm(BigDecimal.valueOf(distanceKm));
+                booking.setDistanceSource(DistanceSource.GOONG);
+                booking.setDistanceCalculatedAt(LocalDateTime.now());
+                return;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to calculate distance using MapService: {}", e.getMessage());
+        }
+
+        // Fallback to Haversine (MANUAL)
         double distance = haversineDistance(lat1, lon1, lat2, lon2);
         
         booking.setDistanceKm(BigDecimal.valueOf(distance));
@@ -656,9 +674,19 @@ public class BookingService {
             return "System";
         }
         try {
+            if (role == ActorRole.CUSTOMER) {
+                return customerRepository.findById(userId)
+                        .map(c -> c.getFullName())
+                        .orElse(userRepository.findById(userId).map(u -> u.getEmail()).orElse("Unknown"));
+            } else if (role == ActorRole.TRANSPORT) {
+                return transportRepository.findById(userId)
+                        .map(t -> t.getCompanyName())
+                        .orElse(userRepository.findById(userId).map(u -> u.getEmail()).orElse("Unknown"));
+            }
+            
             User user = userRepository.findById(userId).orElse(null);
             if (user != null) {
-                return user.getFullName() != null ? user.getFullName() : user.getEmail();
+                return user.getEmail();
             }
         } catch (Exception e) {
             // Ignore
@@ -684,10 +712,9 @@ public class BookingService {
             return "Unknown Customer";
         }
         try {
-            User user = userRepository.findById(customerId).orElse(null);
-            if (user != null) {
-                return user.getFullName() != null ? user.getFullName() : user.getEmail();
-            }
+            return customerRepository.findById(customerId)
+                    .map(c -> c.getFullName())
+                    .orElse(userRepository.findById(customerId).map(u -> u.getEmail()).orElse("Customer #" + customerId));
         } catch (Exception e) {
             // Ignore
         }

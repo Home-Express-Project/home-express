@@ -14,6 +14,8 @@ public interface VnProvinceRepository extends JpaRepository<VnProvinceRepository
 
     List<VnProvince> findAllByOrderByProvinceNameAsc();
 
+    java.util.Optional<VnProvince> findFirstByProvinceNameContainingIgnoreCase(String provinceName);
+
     @Entity
     @Table(name = "vn_provinces")
     class VnProvince {

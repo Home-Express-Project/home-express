@@ -60,6 +60,22 @@ public class IntakeParseTextResponse {
         private Boolean requiresDisassembly;
         
         private Double confidence;
+
+        // Enhanced fields
+        @JsonProperty("weight_kg")
+        private Double weightKg;
+        
+        @JsonProperty("width_cm")
+        private Double widthCm;
+        
+        @JsonProperty("height_cm")
+        private Double heightCm;
+        
+        @JsonProperty("depth_cm")
+        private Double depthCm;
+
+        @JsonProperty("reasoning")
+        private String reasoning;
     }
 }
 

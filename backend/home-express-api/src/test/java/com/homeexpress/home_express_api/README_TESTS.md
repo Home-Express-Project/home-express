@@ -11,36 +11,36 @@ Unit tests cho các services và controllers chính của Member 2, bao gồm:
 ## Test Coverage
 
 ### BookingServiceTest
-- ✅ `getBookingTimeline()` - Timeline với status history
-- ✅ `getBookingTimeline()` - Timeline với quotations
-- ✅ `getBookingTimeline()` - Timeline với payments
-- ✅ `getBookingTimeline()` - Booking not found
-- ✅ `getBookingTimeline()` - Events sorted by timestamp
+- `getBookingTimeline()` - Timeline với status history
+- `getBookingTimeline()` - Timeline với quotations
+- `getBookingTimeline()` - Timeline với payments
+- `getBookingTimeline()` - Booking not found
+- `getBookingTimeline()` - Events sorted by timestamp
 
 ### QuotationServiceTest
-- ✅ `getQuotationById()` - Success case
-- ✅ `getQuotationById()` - Not found
-- ✅ `rejectQuotation()` - Success
-- ✅ `rejectQuotation()` - Invalid status
-- ✅ `rejectQuotation()` - Not found
-- ✅ `createQuotation()` - Success
+- `getQuotationById()` - Success case
+- `getQuotationById()` - Not found
+- `rejectQuotation()` - Success
+- `rejectQuotation()` - Invalid status
+- `rejectQuotation()` - Not found
+- `createQuotation()` - Success
 
 ### PaymentServiceTest
-- ✅ `getPaymentSummary()` - Success
-- ✅ `getPaymentSummary()` - Booking not found
-- ✅ `getPaymentSummary()` - Unauthorized
-- ✅ `initializePayment()` - Success
-- ✅ `confirmPayment()` - Success
-- ✅ `confirmPayment()` - Invalid status
-- ✅ `confirmPayment()` - Not found
+- `getPaymentSummary()` - Success
+- `getPaymentSummary()` - Booking not found
+- `getPaymentSummary()` - Unauthorized
+- `initializePayment()` - Success
+- `confirmPayment()` - Success
+- `confirmPayment()` - Invalid status
+- `confirmPayment()` - Not found
 
 ### AdminBookingControllerTest
-- ✅ `getBookingTimeline()` - Success
-- ✅ `getBookingTimeline()` - Not found
-- ✅ `getBookingTimeline()` - Unauthorized
+- `getBookingTimeline()` - Success
+- `getBookingTimeline()` - Not found
+- `getBookingTimeline()` - Unauthorized
 
 ### CustomExceptionTest
-- ✅ Exception constructors and messages
+- Exception constructors and messages
 
 ## Running Tests
 

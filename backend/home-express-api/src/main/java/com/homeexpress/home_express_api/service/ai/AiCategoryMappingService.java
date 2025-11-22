@@ -19,13 +19,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 /**
- * Provides deterministic mapping between AI-detected labels and system categories/sizes.
+ * Service chuyên nhiệm vụ "phiên dịch" danh mục.
+ * AI thường trả về tên tiếng Anh hoặc từ chung chung (VD: "fridge").
+ * Class này sẽ map chúng về danh mục chuẩn trong database (VD: "Refrigerator").
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class AiCategoryMappingService {
 
+    // Từ điển mapping cứng (Hardcoded rules)
+    // Key: Từ khóa AI trả về (viết thường)
+    // Value: Tên danh mục chuẩn trong DB
     private static final Map<String, MappingRule> CATEGORY_RULES = Map.ofEntries(
         Map.entry("refrigerator", new MappingRule("Refrigerator", null)),
         Map.entry("fridge", new MappingRule("Refrigerator", null)),
@@ -63,12 +68,18 @@ public class AiCategoryMappingService {
     private final CategoryRepository categoryRepository;
     private final SizeRepository sizeRepository;
 
+    /**
+     * Hàm chính: Nhận vào item từ AI -> Trả về ID danh mục và ID kích thước trong DB.
+     */
     public CategorySizeMapping map(EnhancedDetectedItem item) {
         if (item == null) {
             return CategorySizeMapping.empty();
         }
 
+        // Gom tất cả các từ khóa có thể dùng để đoán (tên, category, subcategory, notes)
         List<String> candidates = collectCandidates(item);
+        
+        // Duyệt qua từng từ khóa xem có khớp với từ điển không
         for (String candidate : candidates) {
             MappingRule rule = CATEGORY_RULES.get(candidate);
             if (rule == null) {
@@ -84,18 +95,21 @@ public class AiCategoryMappingService {
         return CategorySizeMapping.empty();
     }
 
+    // Tìm Category và Size trong DB dựa trên rule
     private CategorySizeMapping applyRule(MappingRule rule) {
+        // Tìm category theo tên (tiếng Anh hoặc tiếng Việt)
         Optional<Category> categoryOpt = categoryRepository.findByNameEnIgnoreCase(rule.categoryName())
             .or(() -> categoryRepository.findByNameIgnoreCase(rule.categoryName()));
 
         if (categoryOpt.isEmpty()) {
-            log.debug("Category mapping rule {} not found in database", rule);
+            log.debug("Không tìm thấy danh mục '{}' trong database", rule);
             return CategorySizeMapping.empty();
         }
 
         Category category = categoryOpt.get();
         Long sizeId = null;
 
+        // Nếu rule có quy định size cụ thể thì tìm size ID luôn
         if (rule.sizeName() != null) {
             sizeId = sizeRepository.findByCategory_CategoryIdAndNameIgnoreCase(category.getCategoryId(), rule.sizeName())
                 .map(Size::getSizeId)
@@ -105,6 +119,7 @@ public class AiCategoryMappingService {
         return new CategorySizeMapping(category.getCategoryId(), sizeId);
     }
 
+    // Gom nhặt các từ khóa tiềm năng từ item
     private List<String> collectCandidates(EnhancedDetectedItem item) {
         Set<String> tokens = new LinkedHashSet<>();
 
@@ -116,6 +131,7 @@ public class AiCategoryMappingService {
         return new ArrayList<>(tokens);
     }
 
+    // Chuẩn hóa text và thêm vào danh sách token
     private void addCandidate(Set<String> tokens, String rawText) {
         String normalized = normalize(rawText);
         if (normalized == null) {
@@ -124,16 +140,18 @@ public class AiCategoryMappingService {
 
         tokens.add(normalized);
 
+        // Tách thành các từ đơn nếu chuỗi dài
         String[] parts = normalized.split(" ");
         if (parts.length > 1) {
             for (String part : parts) {
-                if (part.length() >= 3) {
+                if (part.length() >= 3) { // Chỉ lấy từ có độ dài >= 3 cho đỡ nhiễu
                     tokens.add(part);
                 }
             }
         }
     }
 
+    // Hàm làm sạch chuỗi (bỏ dấu, bỏ ký tự đặc biệt)
     private String normalize(String value) {
         if (value == null) {
             return null;

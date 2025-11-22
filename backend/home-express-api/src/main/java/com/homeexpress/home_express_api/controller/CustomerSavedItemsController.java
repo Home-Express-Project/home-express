@@ -3,6 +3,7 @@ package com.homeexpress.home_express_api.controller;
 import com.homeexpress.home_express_api.dto.request.SaveItemRequest;
 import com.homeexpress.home_express_api.dto.request.SaveItemsRequest;
 import com.homeexpress.home_express_api.dto.response.SavedItemResponse;
+import com.homeexpress.home_express_api.entity.Customer;
 import com.homeexpress.home_express_api.entity.User;
 import com.homeexpress.home_express_api.service.SavedItemService;
 import jakarta.validation.Valid;
@@ -29,16 +30,31 @@ public class CustomerSavedItemsController {
     private final SavedItemService savedItemService;
 
     /**
+     * Helper to extract user ID from principal
+     */
+    private Long getUserId(Object principal) {
+        if (principal instanceof Customer) {
+            return ((Customer) principal).getCustomerId();
+        } else if (principal instanceof User) {
+            return ((User) principal).getUserId();
+        } else if (principal instanceof Long) {
+            return (Long) principal;
+        }
+        throw new IllegalArgumentException("Unknown principal type: " + (principal != null ? principal.getClass().getName() : "null"));
+    }
+
+    /**
      * Get all saved items for the current customer
      * GET /api/v1/customer/saved-items
      */
     @GetMapping
     public ResponseEntity<Map<String, Object>> getSavedItems(
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
-        log.debug("Customer {} fetching saved items", user.getUserId());
+        Long userId = getUserId(principal);
+        log.debug("Customer {} fetching saved items", userId);
         
-        List<SavedItemResponse> items = savedItemService.getSavedItems(user.getUserId());
+        List<SavedItemResponse> items = savedItemService.getSavedItems(userId);
         
         return ResponseEntity.ok(Map.of(
                 "items", items,
@@ -53,11 +69,12 @@ public class CustomerSavedItemsController {
     @PostMapping("/single")
     public ResponseEntity<SavedItemResponse> saveSingleItem(
             @Valid @RequestBody SaveItemRequest request,
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
-        log.info("Customer {} saving single item '{}'", user.getUserId(), request.getName());
+        Long userId = getUserId(principal);
+        log.info("Customer {} saving single item '{}'", userId, request.getName());
         
-        SavedItemResponse response = savedItemService.saveSingleItem(user.getUserId(), request);
+        SavedItemResponse response = savedItemService.saveSingleItem(userId, request);
         
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
@@ -66,14 +83,15 @@ public class CustomerSavedItemsController {
      * Save multiple items at once
      * POST /api/v1/customer/saved-items
      */
-    @PostMapping
+    @PostMapping("/batch")
     public ResponseEntity<Map<String, Object>> saveMultipleItems(
             @Valid @RequestBody SaveItemsRequest request,
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
-        log.info("Customer {} saving {} items", user.getUserId(), request.getItems().size());
+        Long userId = getUserId(principal);
+        log.info("Customer {} saving {} items", userId, request.getItems().size());
         
-        int count = savedItemService.saveMultipleItems(user.getUserId(), request.getItems());
+        int count = savedItemService.saveMultipleItems(userId, request.getItems());
         
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
                 "count", count,
@@ -89,11 +107,12 @@ public class CustomerSavedItemsController {
     public ResponseEntity<SavedItemResponse> updateSavedItem(
             @PathVariable Long id,
             @Valid @RequestBody SaveItemRequest request,
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
-        log.info("Customer {} updating saved item {}", user.getUserId(), id);
+        Long userId = getUserId(principal);
+        log.info("Customer {} updating saved item {}", userId, id);
         
-        SavedItemResponse response = savedItemService.updateSavedItem(id, user.getUserId(), request);
+        SavedItemResponse response = savedItemService.updateSavedItem(id, userId, request);
         
         return ResponseEntity.ok(response);
     }
@@ -105,11 +124,12 @@ public class CustomerSavedItemsController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Map<String, String>> deleteSavedItem(
             @PathVariable Long id,
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
-        log.info("Customer {} deleting saved item {}", user.getUserId(), id);
+        Long userId = getUserId(principal);
+        log.info("Customer {} deleting saved item {}", userId, id);
         
-        savedItemService.deleteSavedItem(id, user.getUserId());
+        savedItemService.deleteSavedItem(id, userId);
         
         return ResponseEntity.ok(Map.of(
                 "message", "Saved item deleted successfully"
@@ -124,8 +144,9 @@ public class CustomerSavedItemsController {
     @DeleteMapping
     public ResponseEntity<Map<String, Object>> deleteMultipleSavedItems(
             @RequestBody Map<String, List<Long>> request,
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
+        Long userId = getUserId(principal);
         List<Long> ids = request.get("ids");
         if (ids == null || ids.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -133,9 +154,9 @@ public class CustomerSavedItemsController {
             ));
         }
         
-        log.info("Customer {} deleting {} saved items", user.getUserId(), ids.size());
+        log.info("Customer {} deleting {} saved items", userId, ids.size());
         
-        int deletedCount = savedItemService.deleteMultipleSavedItems(user.getUserId(), ids);
+        int deletedCount = savedItemService.deleteMultipleSavedItems(userId, ids);
         
         return ResponseEntity.ok(Map.of(
                 "count", deletedCount,
@@ -149,11 +170,12 @@ public class CustomerSavedItemsController {
      */
     @DeleteMapping("/all")
     public ResponseEntity<Map<String, String>> deleteAllSavedItems(
-            @AuthenticationPrincipal User user) {
+            @AuthenticationPrincipal Object principal) {
         
-        log.info("Customer {} deleting all saved items", user.getUserId());
+        Long userId = getUserId(principal);
+        log.info("Customer {} deleting all saved items", userId);
         
-        savedItemService.deleteAllSavedItems(user.getUserId());
+        savedItemService.deleteAllSavedItems(userId);
         
         return ResponseEntity.ok(Map.of(
                 "message", "All saved items deleted successfully"

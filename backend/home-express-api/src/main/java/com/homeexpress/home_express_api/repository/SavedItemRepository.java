@@ -20,9 +20,9 @@ public interface SavedItemRepository extends JpaRepository<SavedItem, Long> {
     List<SavedItem> findByCustomerId(Long customerId);
     
     /**
-     * Find a saved item by ID and customer ID (ensures authorization)
+     * Find a saved item by its primary key and customer ID (ensures authorization)
      */
-    Optional<SavedItem> findByIdAndCustomerId(Long id, Long customerId);
+    Optional<SavedItem> findBySavedItemIdAndCustomerId(Long savedItemId, Long customerId);
     
     /**
      * Delete all saved items for a specific customer

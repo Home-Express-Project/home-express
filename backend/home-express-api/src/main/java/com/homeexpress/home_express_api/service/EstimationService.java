@@ -14,6 +14,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import com.homeexpress.home_express_api.service.map.MapService;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -55,16 +56,19 @@ public class EstimationService {
     private final VehicleRepository vehicleRepository;
     private final VehiclePricingRepository vehiclePricingRepository;
     private final CategoryPricingRepository categoryPricingRepository;
+    private final MapService mapService;
 
     public EstimationService(
             TransportRepository transportRepository,
             VehicleRepository vehicleRepository,
             VehiclePricingRepository vehiclePricingRepository,
-            CategoryPricingRepository categoryPricingRepository) {
+            CategoryPricingRepository categoryPricingRepository,
+            MapService mapService) {
         this.transportRepository = transportRepository;
         this.vehicleRepository = vehicleRepository;
         this.vehiclePricingRepository = vehiclePricingRepository;
         this.categoryPricingRepository = categoryPricingRepository;
+        this.mapService = mapService;
     }
 
     public AutoEstimationResponse generateAutoEstimation(AutoEstimationRequest request) {
@@ -79,7 +83,7 @@ public class EstimationService {
         AddressComponents pickupAddress = parseAddress(request.getPickupAddress());
         AddressComponents deliveryAddress = parseAddress(request.getDeliveryAddress());
 
-        double distanceKm = estimateDistanceKm(pickupAddress, deliveryAddress, request.getItems().size());
+        double distanceKm = calculateDistance(request, pickupAddress, deliveryAddress);
         BigDecimal totalWeightKg = estimateWeightKg(request);
         VehicleType recommendedType = recommendVehicleType(totalWeightKg, request.getItems().size());
         ZonedDateTime pickupDateTime = resolvePickupDateTime(request.getPickupDatetime());
@@ -511,6 +515,29 @@ public class EstimationService {
                 .collect(Collectors.joining(", ")).trim();
 
         return new AddressComponents(street, ward, district, province);
+    }
+
+    private double calculateDistance(AutoEstimationRequest request, AddressComponents pickup, AddressComponents delivery) {
+        // 1. Try using coordinates from request if available
+        if (request.getPickupLat() != null && request.getPickupLng() != null &&
+            request.getDeliveryLat() != null && request.getDeliveryLng() != null) {
+            try {
+                long distanceMeters = mapService.calculateDistanceInMeters(
+                        request.getPickupLat().doubleValue(),
+                        request.getPickupLng().doubleValue(),
+                        request.getDeliveryLat().doubleValue(),
+                        request.getDeliveryLng().doubleValue()
+                );
+                if (distanceMeters > 0) {
+                    return roundDistance(distanceMeters / 1000.0);
+                }
+            } catch (Exception e) {
+                // Fallback to text estimation
+            }
+        }
+
+        // 2. Fallback to text-based estimation
+        return estimateDistanceKm(pickup, delivery, request.getItems() != null ? request.getItems().size() : 0);
     }
 
     private double estimateDistanceKm(AddressComponents pickup, AddressComponents delivery, int itemCount) {

@@ -12,7 +12,9 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Cache service for AI detection results using Redis
+ * Service lưu trữ tạm thời (Cache) kết quả AI bằng Redis.
+ * Giúp tiết kiệm tiền và thời gian: Nếu cùng một bộ ảnh được gửi lên lần 2,
+ * hệ thống sẽ trả về kết quả cũ ngay lập tức thay vì gọi OpenAI lại.
  */
 @Slf4j
 @Service
@@ -23,17 +25,15 @@ public class DetectionCacheService {
     private final ObjectMapper objectMapper;
     
     /**
-     * Get cached detection result
-     * 
-     * @param cacheKey Cache key
-     * @return DetectionResult if cached, null otherwise
+     * Lấy kết quả đã lưu trong Cache (nếu có).
+     * @param cacheKey Khóa định danh (thường là mã hash của danh sách URL ảnh)
      */
     public DetectionResult get(String cacheKey) {
         try {
             String cached = redisTemplate.opsForValue().get(cacheKey);
             
             if (cached == null) {
-                log.debug("Cache miss for key: {}", cacheKey);
+                log.debug("Không tìm thấy cache cho key: {}", cacheKey);
                 return null;
             }
             
@@ -41,67 +41,56 @@ public class DetectionCacheService {
             if (result.getEnhancedItems() == null) {
                 result.setEnhancedItems(List.of());
             }
-            log.info("✓ Cache hit for key: {}", cacheKey);
+            log.info("✓ Lấy thành công kết quả từ Cache (Key: {})", cacheKey);
             
             return result;
             
         } catch (JsonProcessingException e) {
-            log.error("Failed to deserialize cached result for key: {}", cacheKey, e);
-            // Delete corrupted cache entry
+            log.error("Lỗi đọc dữ liệu cache (JSON hỏng): {}", cacheKey, e);
+            // Nếu dữ liệu hỏng thì xóa luôn để lần sau lưu cái mới
             redisTemplate.delete(cacheKey);
             return null;
         } catch (Exception e) {
-            log.error("Failed to retrieve cache for key: {}", cacheKey, e);
+            log.error("Lỗi kết nối Redis khi lấy cache: {}", cacheKey, e);
             return null;
         }
     }
     
     /**
-     * Put detection result in cache
-     * 
-     * @param cacheKey Cache key
-     * @param result Detection result to cache
-     * @param ttlSeconds Time to live in seconds
+     * Lưu kết quả AI vào Cache.
+     * @param ttlSeconds Thời gian sống (Time To Live). Sau thời gian này cache sẽ tự hủy.
      */
     public void put(String cacheKey, DetectionResult result, long ttlSeconds) {
         try {
             String json = objectMapper.writeValueAsString(result);
             redisTemplate.opsForValue().set(cacheKey, json, ttlSeconds, TimeUnit.SECONDS);
             
-            log.info("✓ Cached detection result for key: {} (TTL: {}s)", cacheKey, ttlSeconds);
+            log.info("✓ Đã lưu kết quả vào Cache (Key: {}, TTL: {}s)", cacheKey, ttlSeconds);
             
         } catch (JsonProcessingException e) {
-            log.error("Failed to serialize detection result for caching: {}", e.getMessage());
+            log.error("Lỗi đóng gói dữ liệu để cache: {}", e.getMessage());
         } catch (Exception e) {
-            log.error("Failed to cache detection result for key: {}", cacheKey, e);
+            log.error("Lỗi kết nối Redis khi lưu cache: {}", cacheKey, e);
         }
     }
     
     /**
-     * Delete cached result
-     * 
-     * @param cacheKey Cache key
+     * Xóa cache thủ công (ít dùng, thường để hệ thống tự hủy theo TTL).
      */
     public void delete(String cacheKey) {
         try {
             redisTemplate.delete(cacheKey);
-            log.info("✓ Deleted cache for key: {}", cacheKey);
+            log.info("✓ Đã xóa cache: {}", cacheKey);
         } catch (Exception e) {
-            log.error("Failed to delete cache for key: {}", cacheKey, e);
+            log.error("Lỗi khi xóa cache: {}", cacheKey, e);
         }
     }
     
-    /**
-     * Check if result is cached
-     * 
-     * @param cacheKey Cache key
-     * @return true if cached, false otherwise
-     */
     public boolean exists(String cacheKey) {
         try {
             return Boolean.TRUE.equals(redisTemplate.hasKey(cacheKey));
         } catch (Exception e) {
-            log.error("Failed to check cache existence for key: {}", cacheKey, e);
+            log.error("Lỗi kiểm tra cache tồn tại: {}", cacheKey, e);
             return false;
         }
     }

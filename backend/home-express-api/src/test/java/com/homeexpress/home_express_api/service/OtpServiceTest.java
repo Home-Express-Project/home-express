@@ -24,10 +24,7 @@ class OtpServiceTest {
     private OtpRepository otpRepository;
 
     @Mock
-    private SecurityConfigProperties securityConfig;
-
-    @Mock
-    private SecurityConfigProperties.OtpConfig otpConfig;
+    private EmailService emailService;
 
     @InjectMocks
     private OtpService otpService;
@@ -48,10 +45,6 @@ class OtpServiceTest {
 
     @Test
     void testGenerateOtp_Success() {
-        // Given
-        when(securityConfig.getOtp()).thenReturn(otpConfig);
-        when(otpConfig.getCodeLength()).thenReturn(6);
-
         // When
         String otp = otpService.generateOtp();
 
@@ -70,9 +63,6 @@ class OtpServiceTest {
     void testCreateAndSendOtp_Success() {
         // Given
         String email = "customer@test.com";
-        when(securityConfig.getOtp()).thenReturn(otpConfig);
-        when(otpConfig.getCodeLength()).thenReturn(6);
-        when(otpConfig.getExpirationMinutes()).thenReturn(5);
         when(otpRepository.save(any(OtpCode.class))).thenReturn(mockOtpCode);
 
         // When

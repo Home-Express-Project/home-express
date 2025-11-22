@@ -16,19 +16,21 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * AI Detection Orchestrator (GPT-only)
- *
- * The system now relies solely on gpt-5-mini for visual understanding. We keep
- * the Redis cache, basic confidence checks, and manual fallback flow but remove
- * every Google/Gemini dependency to simplify the stack.
+ * Service Nhận diện AI Chính (Core Service).
+ * 
+ * Class này là trung tâm xử lý, kết hợp:
+ * 1. Gọi GPT Vision để soi ảnh.
+ * 2. Cache kết quả vào Redis để tiết kiệm.
+ * 3. Kiểm tra độ tin cậy (Confidence) để cảnh báo nếu AI "không chắc lắm".
+ * 4. Xử lý lỗi (Fallback) nếu AI sập.
  */
 @Slf4j
+@Service
 @RequiredArgsConstructor
-public class HybridAIDetectionOrchestrator {
+public class AIDetectionService {
 
-    private final GptService gptService;
+    private final GPTVisionService gptService;
     private final DetectionCacheService cacheService;
-    private final BudgetLimitService budgetLimitService;
 
     @Value("${ai.detection.confidence-threshold:0.85}")
     private Double confidenceThreshold;
@@ -37,14 +39,17 @@ public class HybridAIDetectionOrchestrator {
     private Integer cacheTtlSeconds;
 
     /**
-     * Detect household items using GPT-5 mini, with cache + manual fallback.
+     * Hàm nhận diện đồ vật từ danh sách ảnh.
+     * Quy trình: Check Cache -> Gọi AI -> Lưu Cache.
      */
-    public DetectionResult detectItemsHybrid(List<String> imageUrls) {
+    public DetectionResult detectItems(List<String> imageUrls) {
+        // Tạo key cache dựa trên danh sách URL ảnh (hash SHA-256)
         String cacheKey = generateCacheKey(imageUrls);
 
+        // 1. Kiểm tra cache trước
         DetectionResult cachedResult = cacheService.get(cacheKey);
         if (cachedResult != null) {
-            log.info("Cache hit for {} images - returning cached detection", imageUrls.size());
+            log.info("Đã có cache cho {} ảnh - Trả về ngay", imageUrls.size());
             ensureEnhancedItems(cachedResult);
             cachedResult.setFromCache(true);
             return cachedResult;
@@ -52,47 +57,51 @@ public class HybridAIDetectionOrchestrator {
 
         long startTime = System.currentTimeMillis();
         try {
-            log.info("gpt-5-mini detection started - {} images", imageUrls.size());
-            DetectionResult gptResult = gptService.detectItems(imageUrls);
-            ensureEnhancedItems(gptResult);
+            log.info("Bắt đầu gọi AI nhận diện - {} ảnh", imageUrls.size());
+            
+            // 2. Gọi GPT Vision
+            DetectionResult result = gptService.detectItems(imageUrls);
+            ensureEnhancedItems(result);
 
             long latency = System.currentTimeMillis() - startTime;
-            gptResult.setProcessingTimeMs(latency);
-            gptResult.setImageCount(imageUrls.size());
-            gptResult.setImageUrls(imageUrls);
+            result.setProcessingTimeMs(latency);
+            result.setImageCount(imageUrls.size());
+            result.setImageUrls(imageUrls);
 
-            if (gptResult.getItems() == null || gptResult.getItems().isEmpty()) {
-                log.warn("gpt-5-mini returned no items - manual input required");
-                budgetLimitService.recordOpenAIUsage(imageUrls.size());
+            // Nếu AI trả về rỗng -> Cần nhập tay
+            if (result.getItems() == null || result.getItems().isEmpty()) {
+                log.warn("AI không tìm thấy món nào - Yêu cầu nhập tay");
                 return createManualInputResult(imageUrls, "NO_ITEMS_DETECTED", latency);
             }
 
-            Double confidence = gptResult.getConfidence() != null ? gptResult.getConfidence() : 0.0;
+            Double confidence = result.getConfidence() != null ? result.getConfidence() : 0.0;
             log.info(
-                "gpt-5-mini completed - confidence: {}% - items: {} - latency: {}ms",
+                "AI hoàn tất - Độ tin cậy: {}% - Số lượng: {} - Thời gian: {}ms",
                 String.format("%.2f", confidence * 100),
-                gptResult.getItems().size(),
+                result.getItems().size(),
                 latency
             );
 
+            // 3. Kiểm tra độ tin cậy
             if (confidence < confidenceThreshold) {
                 log.warn(
-                    "Low confidence ({}%) from gpt-5-mini - flagging manual review",
+                    "Độ tin cậy thấp ({}%) - Đánh dấu cần kiểm tra lại",
                     String.format("%.2f", confidence * 100)
                 );
-                gptResult.setManualReviewRequired(true);
-                gptResult.setFailureReason("OPENAI_VISION_LOW_CONFIDENCE");
+                result.setManualReviewRequired(true);
+                result.setFailureReason("AI_VISION_LOW_CONFIDENCE");
             }
 
-            cacheService.put(cacheKey, gptResult, ttlSeconds());
-            budgetLimitService.recordOpenAIUsage(imageUrls.size());
-            return gptResult;
+            // 4. Lưu vào cache
+            cacheService.put(cacheKey, result, ttlSeconds());
+            return result;
 
         } catch (Exception e) {
-            log.error("gpt-5-mini detection failed: {}", e.getMessage(), e);
+            log.error("Lỗi nghiêm trọng khi gọi AI: {}", e.getMessage(), e);
+            // Trả về kết quả báo lỗi để Frontend biết đường xử lý (hiện form nhập tay)
             return createManualInputResult(
                 imageUrls,
-                "OPENAI_VISION_FAILED",
+                "AI_VISION_FAILED",
                 System.currentTimeMillis() - startTime
             );
         }
@@ -103,7 +112,7 @@ public class HybridAIDetectionOrchestrator {
     }
 
     /**
-     * Manual fallback payload when GPT cannot help.
+     * Tạo kết quả dự phòng khi AI thất bại (Fallback).
      */
     private DetectionResult createManualInputResult(List<String> imageUrls, String reason, long processingTime) {
         return DetectionResult.builder()
@@ -125,10 +134,11 @@ public class HybridAIDetectionOrchestrator {
         }
     }
 
+    // Tạo cache key an toàn bằng cách hash danh sách URL
     private String generateCacheKey(List<String> imageUrls) {
         try {
             String combined = imageUrls.stream()
-                .sorted()
+                .sorted() // Sort để thứ tự ảnh không ảnh hưởng key
                 .collect(Collectors.joining("|"));
 
             MessageDigest digest = MessageDigest.getInstance("SHA-256");

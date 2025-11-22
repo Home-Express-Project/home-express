@@ -26,6 +26,18 @@ public class LocationController {
         return ResponseEntity.ok(provinces);
     }
 
+    @GetMapping("/provinces/{provinceCode}/districts")
+    public ResponseEntity<List<DistrictDto>> getDistrictsByPath(@PathVariable String provinceCode) {
+        List<DistrictDto> districts = vnLocationService.getDistrictsByProvince(provinceCode);
+        return ResponseEntity.ok(districts);
+    }
+
+    @GetMapping("/districts/{districtCode}/wards")
+    public ResponseEntity<List<WardDto>> getWardsByPath(@PathVariable String districtCode) {
+        List<WardDto> wards = vnLocationService.getWardsByDistrict(districtCode);
+        return ResponseEntity.ok(wards);
+    }
+
     @GetMapping("/districts")
     public ResponseEntity<List<DistrictDto>> getDistricts(@RequestParam String provinceCode) {
         List<DistrictDto> districts = vnLocationService.getDistrictsByProvince(provinceCode);

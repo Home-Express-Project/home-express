@@ -12,17 +12,24 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
+import io.github.resilience4j.retry.annotation.Retry;
 
 import java.time.Duration;
+
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * Service chuyên trách việc phân tích danh sách đồ đạc (Intake Parsing).
+ * Nhiệm vụ: Chuyển đổi văn bản khách hàng nhập vào thành danh sách vật dụng cụ thể để hệ thống tính toán.
+ */
 @Slf4j
 @Service
 public class IntakeAIParsingService {
 
+    // === Cấu hình hệ thống ===
     @Value("${openai.api.key:#{null}}")
     private String openaiApiKey;
 
@@ -36,69 +43,251 @@ public class IntakeAIParsingService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public IntakeAIParsingService() {
+        // Cài đặt timeout để tránh việc chờ đợi quá lâu nếu API bên kia gặp sự cố
         this.restTemplate = buildRestTemplate();
     }
 
+    /**
+     * Hàm xử lý chính: Nhận văn bản -> Trả về danh sách đồ.
+     * Quy trình: Thử dùng AI trước, nếu không được thì dùng logic thủ công.
+     * @Retry: Cấu hình tự động thử lại khi gặp lỗi. Nếu thử hết số lần vẫn lỗi thì gọi hàm fallbackWithHeuristic.
+     */
+    @Retry(name = "intake-ai", fallbackMethod = "fallbackWithHeuristic")
     public List<IntakeParseTextResponse.ParsedItem> parseWithAI(String text) {
         if (!StringUtils.hasText(text)) {
             return List.of();
         }
 
-        // Chuẩn hóa và chia dòng
+        // Bước 1: Làm sạch văn bản đầu vào (bỏ dòng trống, cắt gọt ký tự thừa)
         List<String> lines = preprocessText(text);
         if (lines.isEmpty()) {
             return List.of();
         }
 
-        // Không có API key: fallback heuristic trên từng dòng
+        // Bước 2: Nếu không cấu hình API Key thì chuyển ngay sang xử lý thủ công
         if (!StringUtils.hasText(openaiApiKey)) {
-            log.warn("OpenAI API key missing. Using heuristic fallback.");
-            return fallbackFromLines(lines);
+            log.warn("Chưa cấu hình OpenAI Key. Chuyển sang chế độ xử lý thủ công.");
+            return fallbackInternal(lines);
         }
 
+        // Bước 3: Gửi yêu cầu sang OpenAI.
+        int estimatedMaxItems = Math.max(20, lines.size() * 10); 
+        
+        String content = null;
         try {
-            // Gọi OpenAI với flexible item count (allow splitting complex descriptions)
-            // Estimate max items: each line could potentially split into 3 items (e.g., "1 bộ bàn ăn 6 ghế" → table + chairs)
-            int estimatedMaxItems = lines.size() * 3;
-            String content = callOpenAI(buildSystemPrompt(), buildUserPrompt(lines), lines.size(), estimatedMaxItems);
-            List<ParsedItemRaw> raw = parseRaw(content);
-            if (raw == null || raw.isEmpty()) {
-                log.warn("AI returned empty. Fallback heuristic.");
-                return fallbackFromLines(lines);
-            }
-
-            // No alignment needed - AI can return any number of items
-            log.info("AI parsing: {} input lines → {} output items", lines.size(), raw.size());
-            return raw.stream().map(this::toDomain).collect(Collectors.toList());
+            content = callOpenAI(buildSystemPrompt(), buildUserPrompt(lines), 1, estimatedMaxItems);
         } catch (Exception e) {
-            log.error("AI parsing failed. Fallback heuristic.", e);
-            return fallbackFromLines(lines);
+            // Cần ném ngoại lệ ra ngoài để Retry nhận biết có lỗi và kích hoạt thử lại.
+            throw new RuntimeException(e);
         }
+
+        List<ParsedItemRaw> raw = parseRaw(content);
+        
+        // Nếu AI trả về rỗng thì cũng coi là lỗi để thử lại.
+        if (raw == null || raw.isEmpty()) {
+            throw new RuntimeException("AI trả về kết quả rỗng");
+        }
+
+        log.info("AI xử lý xong: {} dòng đầu vào -> {} món đồ.", lines.size(), raw.size());
+        
+        // Chuyển đổi sang Domain và chạy bước Hậu kiểm (Refinement) để sửa lỗi AI
+        return raw.stream()
+                .map(this::toDomain)
+                .map(this::refineItem) // Bước mới: Tự động sửa lỗi category/flag
+                .collect(Collectors.toList());
     }
 
-    // =================== OpenAI ===================
+    private static final Map<String, String> VIETNAMESE_DICTIONARY = Map.ofEntries(
+        Map.entry("tu lanh", "Tủ lạnh"),
+        Map.entry("may giat", "Máy giặt"),
+        Map.entry("may say", "Máy sấy"),
+        Map.entry("ti vi", "Tivi"),
+        Map.entry("tv", "Tivi"),
+        Map.entry("dieu hoa", "Điều hòa"),
+        Map.entry("may lanh", "Máy lạnh"),
+        Map.entry("quat", "Quạt"),
+        Map.entry("noi com", "Nồi cơm điện"),
+        Map.entry("bep tu", "Bếp từ"),
+        Map.entry("lo vi song", "Lò vi sóng"),
+        Map.entry("may loc nuoc", "Máy lọc nước"),
+        Map.entry("bo ban ghe", "Bộ bàn ghế"),
+        Map.entry("ban an", "Bàn ăn"),
+        Map.entry("ban lam viec", "Bàn làm việc"),
+        Map.entry("ban hoc", "Bàn học"),
+        Map.entry("ghe xoay", "Ghế xoay"),
+        Map.entry("sofa", "Sofa"),
+        Map.entry("giuong", "Giường ngủ"),
+        Map.entry("tu quan ao", "Tủ quần áo"),
+        Map.entry("ke sach", "Kệ sách"),
+        Map.entry("ban trang diem", "Bàn trang điểm"),
+        Map.entry("ket bia", "Két bia"),
+        Map.entry("thung carton", "Thùng carton"),
+        Map.entry("bo am chen", "Bộ ấm chén"),
+        Map.entry("bat dia", "Bát đĩa"),
+        Map.entry("ly coc", "Ly cốc"),
+        Map.entry("tranh anh", "Tranh ảnh"),
+        Map.entry("guong", "Gương")
+    );
+
+    // Hàm hậu kiểm: Dùng logic thủ công để "trám" các lỗ hổng của AI (ví dụ: không nhận ra tiếng Việt không dấu)
+    private IntakeParseTextResponse.ParsedItem refineItem(IntakeParseTextResponse.ParsedItem item) {
+        // Nếu đã có đủ thông tin quan trọng thì giữ nguyên, hoặc vẫn check lại để chắc chắn
+        String nameNormalized = removeAccents(item.getName()).toLowerCase(Locale.ROOT).trim();
+        
+        // 0. Tự động thêm dấu tiếng Việt (Auto-correct Vietnamese)
+        if (item.getName().split("\\s+").length <= 5) {
+             for (Map.Entry<String, String> entry : VIETNAMESE_DICTIONARY.entrySet()) {
+                 if (nameNormalized.contains(entry.getKey())) {
+                     String correctedName = item.getName().replaceAll("(?i)" + Pattern.quote(entry.getKey()), entry.getValue());
+                     if (!correctedName.equals(item.getName())) {
+                         item.setName(capitalizeName(correctedName));
+                     }
+                 }
+             }
+        }
+
+        // 1. Sửa Category nếu AI trả về "Khác" hoặc sai
+        if ("Khác".equals(item.getCategoryName()) || item.getCategoryName() == null) {
+            String detectedCat = detectCategory(nameNormalized);
+            if (!"Khác".equals(detectedCat)) {
+                item.setCategoryName(detectedCat);
+            }
+        }
+
+        // 2. Check lại cờ Dễ vỡ (AI hay sót)
+        if (!Boolean.TRUE.equals(item.getIsFragile())) {
+            if (isFragile(nameNormalized)) {
+                item.setIsFragile(true);
+            }
+        }
+
+        // 3. Check lại cờ Tháo lắp (Logic code chuẩn hơn AI)
+        double weight = item.getWeightKg() != null ? item.getWeightKg() : 0;
+        boolean codeSaysDisassemble = requiresDisassembly(nameNormalized, weight);
+        
+        if (!Boolean.TRUE.equals(item.getRequiresDisassembly()) && codeSaysDisassemble) {
+            item.setRequiresDisassembly(true);
+        }
+        if (Boolean.TRUE.equals(item.getRequiresDisassembly()) && !codeSaysDisassemble) {
+             if (!nameNormalized.contains("thao")) {
+                 item.setRequiresDisassembly(false);
+             }
+        }
+        
+        // 4. Điền Brand nếu thiếu
+        if (item.getBrand() == null) {
+            item.setBrand(detectBrand(nameNormalized));
+        }
+
+        // 5. Điền Model nếu thiếu (Trích xuất từ tên sau Brand)
+        if (item.getModel() == null && item.getBrand() != null) {
+            String inferredModel = extractModelFromName(item.getName(), item.getBrand());
+            if (StringUtils.hasText(inferredModel)) {
+                item.setModel(inferredModel);
+            }
+        }
+
+        // 6. Tính lại độ tin cậy dựa trên độ hoàn thiện dữ liệu (Completeness Score)
+        item.setConfidence(calculateCompleteness(item));
+
+        return item;
+    }
+
+    private String extractModelFromName(String name, String brand) {
+        if (!StringUtils.hasText(name) || !StringUtils.hasText(brand)) return null;
+        
+        // Case insensitive search for brand
+        int idx = name.toLowerCase(Locale.ROOT).indexOf(brand.toLowerCase(Locale.ROOT));
+        if (idx >= 0) {
+            // Extract part after brand
+            String after = name.substring(idx + brand.length()).trim();
+            
+            // Clean up leading separators
+            after = after.replaceAll("^[-:,\\s]+", "");
+            
+            // Filter out common category words if they appear (e.g. "Samsung Tủ lạnh" -> don't want "Tủ lạnh" as model)
+            String lowerAfter = after.toLowerCase(Locale.ROOT);
+            if (lowerAfter.equals("tủ lạnh") || lowerAfter.equals("máy giặt") || lowerAfter.equals("điều hòa") || lowerAfter.equals("tivi")) {
+                return null;
+            }
+            
+            // If remainder is substantial, treat as model
+            if (after.length() > 1 && !after.matches("^[\\d\\.,]+(kg|l|lit|inch|cm|m)$")) {
+                return capitalizeName(after);
+            }
+        }
+        return null;
+    }
+
+    private double calculateCompleteness(IntakeParseTextResponse.ParsedItem item) {
+        double score = 0.0;
+        
+        // 1. Tên & Số lượng (Cơ bản nhất) - 40%
+        if (StringUtils.hasText(item.getName())) score += 0.3;
+        if (item.getQuantity() != null && item.getQuantity() > 0) score += 0.1;
+
+        // 2. Phân loại (Quan trọng để xếp xe) - 20%
+        if (StringUtils.hasText(item.getCategoryName()) && !"Khác".equalsIgnoreCase(item.getCategoryName())) {
+            score += 0.2;
+        }
+
+        // 3. Kích thước / Cân nặng (Quan trọng để tính giá) - 30%
+        // Có cân nặng HOẶC có kích thước chi tiết
+        boolean hasWeight = item.getWeightKg() != null && item.getWeightKg() > 0;
+        boolean hasDimensions = (item.getWidthCm() != null && item.getWidthCm() > 0) 
+                             || (item.getHeightCm() != null && item.getHeightCm() > 0)
+                             || (item.getDepthCm() != null && item.getDepthCm() > 0);
+        
+        if (hasWeight || hasDimensions) {
+            score += 0.3;
+        } else if (item.getSize() != null && !"M".equals(item.getSize())) {
+            // Nếu chỉ có size ước lượng (S/L) thì cộng ít hơn một chút
+            score += 0.15;
+        } else {
+            // Trường hợp mặc định size M không có thông số cụ thể -> không cộng điểm
+        }
+
+        // 4. Thông tin bổ sung (Brand/Model) - 10%
+        if (StringUtils.hasText(item.getBrand()) || StringUtils.hasText(item.getModel())) {
+            score += 0.1;
+        }
+
+        // Làm tròn 2 chữ số thập phân
+        return Math.min(Math.round(score * 100.0) / 100.0, 1.0);
+    }
+
+    // Hàm dự phòng cuối cùng, chạy khi đã thử lại nhiều lần nhưng AI vẫn lỗi
+    public List<IntakeParseTextResponse.ParsedItem> fallbackWithHeuristic(String text, Throwable t) {
+        log.error("AI thất bại sau các lần thử lại (Retry). Chuyển sang chế độ dự phòng. Lỗi: {}", t.getMessage());
+        List<String> lines = preprocessText(text);
+        return fallbackInternal(lines);
+    }
+
+    // =================== GIAO TIẾP VỚI OPENAI ===================
+    
     private String callOpenAI(String systemPrompt, String userPrompt, int minItems, int maxItems) throws Exception {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(openaiApiKey);
 
+        // Tạo nội dung chat
         Map<String, Object> systemMsg = Map.of("role", "system", "content", systemPrompt);
         Map<String, Object> userMsg = Map.of("role", "user", "content", userPrompt);
 
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", openaiModel);
         requestBody.put("messages", List.of(systemMsg, userMsg));
-        requestBody.put("temperature", 0.1);
-        requestBody.put("max_tokens", 2000); // Increased for more items
+        requestBody.put("temperature", 0.1); 
+        requestBody.put("max_tokens", 2000); 
 
-        // Flexible JSON Schema: object { items: [ ...minItems to maxItems... ] }
+        // Yêu cầu AI trả về đúng cấu trúc JSON (Structured Outputs)
         Map<String, Object> jsonSchema = buildSchema(minItems, maxItems);
         Map<String, Object> responseFormat = Map.of(
                 "type", "json_schema",
                 "json_schema", Map.of(
                         "name", "intake_items",
                         "schema", jsonSchema,
-                        "strict", true
+                        "strict", true 
                 )
         );
 
@@ -109,8 +298,7 @@ public class IntakeAIParsingService {
             resp = restTemplate.exchange(openaiApiUrl, HttpMethod.POST,
                     new HttpEntity<>(requestBody, headers), String.class);
         } catch (HttpClientErrorException.BadRequest br) {
-            // Fallback: bỏ JSON Schema nếu server/model không hỗ trợ
-            log.warn("response_format=json_schema not accepted. Retrying with json_object.");
+            log.warn("Model không hỗ trợ JSON Schema. Thử lại với định dạng json_object.");
             requestBody.put("response_format", Map.of("type", "json_object"));
             resp = restTemplate.exchange(openaiApiUrl, HttpMethod.POST,
                     new HttpEntity<>(requestBody, headers), String.class);
@@ -118,39 +306,44 @@ public class IntakeAIParsingService {
 
         String body = resp.getBody();
         if (!StringUtils.hasText(body)) {
-            throw new RuntimeException("Empty response from OpenAI");
+            throw new RuntimeException("OpenAI trả về nội dung rỗng.");
         }
 
         ChatCompletionResponse dto = objectMapper.readValue(body, ChatCompletionResponse.class);
         if (dto.choices == null || dto.choices.isEmpty() || dto.choices.get(0).message == null) {
-            throw new RuntimeException("No choices in OpenAI response");
+            throw new RuntimeException("Không tìm thấy câu trả lời trong phản hồi của AI.");
         }
 
         String content = dto.choices.get(0).message.content;
         if (!StringUtils.hasText(content)) {
-            throw new RuntimeException("Empty content");
+            throw new RuntimeException("Nội dung câu trả lời rỗng.");
         }
+        
         return stripCodeFence(content.trim());
     }
 
     private Map<String, Object> buildSchema(int minItems, int maxItems) {
-        Map<String, Object> item = Map.of(
-                "type", "object",
-                "required", List.of("name", "brand", "model", "quantity", "category_name", "size", "is_fragile", "requires_disassembly", "confidence"),
-                "properties", Map.of(
-                        "name", Map.of("type", "string", "minLength", 1),
-                        "brand", Map.of("type", Arrays.asList("string", "null")),
-                        "model", Map.of("type", Arrays.asList("string", "null")),
-                        "quantity", Map.of("type", "integer", "minimum", 1),
-                        "category_name", Map.of("type", "string", "enum", List.of("Điện tử", "Nội thất", "Đồ gia dụng", "Quần áo", "Khác")),
-                        "size", Map.of("type", "string", "enum", List.of("S", "M", "L")),
-                        "is_fragile", Map.of("type", "boolean"),
-                        "requires_disassembly", Map.of("type", "boolean"),
-                        "confidence", Map.of("type", "number", "minimum", 0.8, "maximum", 0.95)
-                )
+        Map<String, Object> item = Map.ofEntries(
+                Map.entry("type", "object"),
+                Map.entry("required", List.of("name", "brand", "model", "quantity", "category_name", "size", "is_fragile", "requires_disassembly", "confidence")),
+                Map.entry("properties", Map.ofEntries(
+                        Map.entry("name", Map.of("type", "string", "minLength", 1)),
+                        Map.entry("brand", Map.of("type", Arrays.asList("string", "null"))),
+                        Map.entry("model", Map.of("type", Arrays.asList("string", "null"))),
+                        Map.entry("quantity", Map.of("type", "integer", "minimum", 1)),
+                        Map.entry("category_name", Map.of("type", "string", "enum", List.of("Điện tử", "Nội thất", "Đồ gia dụng", "Quần áo", "Khác"))),
+                        Map.entry("size", Map.of("type", "string", "enum", List.of("S", "M", "L"))),
+                        Map.entry("is_fragile", Map.of("type", "boolean")),
+                        Map.entry("requires_disassembly", Map.of("type", "boolean")),
+                        Map.entry("confidence", Map.of("type", "number", "minimum", 0.0, "maximum", 1.0)),
+                        Map.entry("reasoning", Map.of("type", "string", "description", "Giải thích ngắn gọn logic phân tách hoặc ước lượng.")),
+                        Map.entry("weight_kg", Map.of("type", "number", "minimum", 0)),
+                        Map.entry("width_cm", Map.of("type", "number", "minimum", 0)),
+                        Map.entry("height_cm", Map.of("type", "number", "minimum", 0)),
+                        Map.entry("depth_cm", Map.of("type", "number", "minimum", 0))
+                ))
         );
 
-        // Flexible array: allow AI to split complex descriptions into multiple items
         Map<String, Object> arrayItems = Map.of(
                 "type", "array",
                 "minItems", minItems,
@@ -158,7 +351,6 @@ public class IntakeAIParsingService {
                 "items", item
         );
 
-        // Top-level object để nhiều model tuân theo strict hơn: { items: [...] }
         return Map.of(
                 "type", "object",
                 "required", List.of("items"),
@@ -166,54 +358,67 @@ public class IntakeAIParsingService {
         );
     }
 
-    // =================== Prompt ===================
     private String buildSystemPrompt() {
-        // Enhanced prompt with smart item splitting for complex Vietnamese furniture descriptions
         return """
-            Bạn là chuyên gia phân tách danh sách vật phẩm vận chuyển tiếng Việt.
-            Trả về MỘT JSON object { "items": [...] }.
-
-            QUAN TRỌNG - PHÂN TÁCH MÔ TẢ PHỨC TẠP:
-            1. Nếu mô tả chứa NHIỀU LOẠI vật phẩm khác nhau, TÁCH thành NHIỀU ITEMS:
-               - "1 bộ bàn ăn 6 ghế" => 2 items: [Bàn ăn (qty:1), Ghế ăn (qty:6)]
-               - "1 phòng học 30 bộ bàn ghế" => 2 items: [Bàn học (qty:30), Ghế học (qty:30)]
-               - "30 bộ bàn ghế" => 2 items: [Bàn (qty:30), Ghế (qty:30)]
-               - "1 bàn + 4 ghế gỗ" => 2 items: [Bàn gỗ (qty:1), Ghế gỗ (qty:4)]
-               - "Combo giường kèm nệm" => 2 items: [Giường (qty:1), Nệm (qty:1)]
-               - "Bộ PC" => 1 item: [Bộ PC (qty:1)]
-
-            2. Nhận diện đúng các mẫu câu có số lượng lồng nhau:
-               - "X bộ bàn ăn Y ghế" = X bàn ăn + (X*Y) ghế ăn
-               - "Phòng học X bộ bàn ghế" = X bàn học + X ghế học (nhân thêm số phòng nếu có)
-               - "X bộ bàn ghế" = X bàn + X ghế
-               - Luôn tạo riêng từng vật thể (bàn, ghế, tủ, thiết bị) thay vì gộp chung.
-
-            3. Các từ nối như "+", "&", "và", "với", "kèm", "cùng" hoặc "combo" diễn đạt nhiều món trong cùng câu → phải tách triệt để, mỗi món có quantity riêng.
-
-            4. Đồ điện tử / máy tính phải được đánh dấu rõ:
-               - "Bộ PC", "máy tính bàn", "computer", "desktop" => category_name "Điện tử", is_fragile true, requires_disassembly false, size "M".
-               - Laptop/máy tính xách tay/máy tính bảng/màn hình/TV => category_name "Điện tử", is_fragile true (cần đóng gói an toàn).
-               - Điện thoại/tablet/thiết bị số => category_name "Điện tử", is_fragile true.
-
-            5. Khi không còn mẫu đặc biệt, giữ nguyên item gốc nhưng đảm bảo quantity và category_name hợp lý.
-
-            Trường cho mỗi item:
-              - name: tên cụ thể (VD: "Bàn ăn", "Ghế học", "Bộ PC")
-              - brand: thương hiệu nếu có, khác thì null
-              - model: mã model nếu có, khác thì null
-              - quantity: số nguyên dương; trích xuất chính xác từ mô tả
-              - category_name: một trong ["Điện tử","Nội thất","Đồ gia dụng","Quần áo","Khác"]
-              - size: một trong ["S","M","L"] theo quy tắc dưới
-              - is_fragile: true cho điện tử (PC/laptop/tivi/màn hình/điện thoại), kính/gương, gốm sứ; false cho bàn ghế, tủ, giường
-              - requires_disassembly: true cho tivi ≥40", tủ lạnh/giặt, giường, tủ lớn, bàn ăn/làm việc, bộ sofa; false cho thiết bị nhỏ và PC
-              - confidence: 0.8-0.95
-
-            size:
-              - S: <20kg (laptop, ghế nhỏ, đồ bếp nhỏ)
-              - M: 20-50kg (PC, tivi <50", bàn/ghế/tủ nhỏ)
-              - L: >50kg (tủ lạnh, máy giặt, tivi ≥50", giường, tủ lớn, bộ sofa)
-
-            Chỉ trả về JSON, không giải thích.
+            Bạn là chuyên gia AI Logistics, chuyên phân tích danh sách đồ đạc vận chuyển.
+            Nhiệm vụ: Phân tích văn bản user nhập và trả về JSON object { "items": [...] }.
+            
+            CÁC QUY TẮC PHÂN TÍCH QUAN TRỌNG:
+            
+            1. BỎ QUA CÁC TIÊU ĐỀ/NGỮ CẢNH (RẤT QUAN TRỌNG):
+               - Nếu dòng bắt đầu bằng ngữ cảnh như "Chuyển văn phòng trọn gói:", "Gói combo:", "Danh sách đồ:", "Phòng khách:"... -> BỎ phần tiêu đề này, chỉ phân tích phần đồ đạc phía sau.
+               - Ví dụ: "Chuyển văn phòng: 10 dàn PC" -> Chỉ lấy [10 Dàn PC].
+               - Ví dụ: "Gói 1: 1 Giường ngủ" -> Chỉ lấy [1 Giường ngủ].
+            
+            2. TÁCH NHỎ CÁC MÓN ĐỒ (QUAN TRỌNG):
+               - Nếu tên chứa "và", "với", "kèm", "cùng" -> Phải tách thành các món riêng biệt.
+               - SAI: { "name": "3 bộ máy tính và 1 máy in" }
+               - ĐÚNG: [ { "name": "Bộ máy tính", "qty": 3 }, { "name": "Máy in", "qty": 1 } ]
+               - Ví dụ: "3 bộ máy tính" => [3 Case PC, 3 Màn hình, 3 Phím chuột] (Tách chi tiết để tính giá chính xác).
+               - Ví dụ: "1 bộ bàn ăn 6 ghế" => [1 Bàn ăn, 6 Ghế ăn].
+            
+            3. NHÂN BẢN SỐ LƯỢNG:
+               - "5 phòng ngủ, mỗi phòng 1 giường, 1 tủ" => [5 Giường ngủ, 5 Tủ quần áo]. (Tự động nhân lên).
+               - "1 phòng học 30 bộ bàn ghế" => [30 Bàn học, 30 Ghế học].
+            
+            4. TRÍCH XUẤT THÔNG SỐ (CÂN NẶNG & KÍCH THƯỚC):
+               - Nếu tên có chứa thông tin cân nặng/kích thước -> TÁCH RA khỏi tên và điền vào trường tương ứng.
+               - VD: "Tủ lạnh Samsung 20kg" -> name: "Tủ lạnh Samsung", weight_kg: 20.
+               - VD: "Tủ 1m2" -> width_cm: 120.
+               - VD: "Sofa 2m4" -> width_cm: 240.
+               - Tự điền thông số chuẩn VN nếu không có: Tủ lạnh side-by-side (~100kg, 90x180x70cm), Máy giặt (~70kg).
+            
+            5. XÁC ĐỊNH ĐỒ DỄ VỠ & CẦN THÁO LẮP:
+               - is_fragile (Dễ vỡ) = TRUE nếu:
+                 + Đồ điện tử có màn hình (Tivi, Monitor, iMac, Laptop).
+                 + Đồ điện lạnh có gas/kính (Tủ lạnh, Tủ mát, Bếp từ).
+                 + Đồ có kính/gương (Bàn trang điểm, Tủ kính, Bể cá, Gương soi).
+                 + Đồ gốm sứ, Bát đĩa, Bình hoa, Đèn chùm.
+                 + Máy lọc nước, Máy in.
+               - requires_disassembly (Cần tháo lắp) = TRUE nếu:
+                 + Giường ngủ (Giường đôi, Giường tầng).
+                 + Tủ quần áo lớn (>2 cánh), Tủ đông/mát công nghiệp, Tủ lạnh Side-by-side (cửa đôi lớn).
+                 + Bàn họp lớn, Bàn giám đốc.
+                 + Sofa chữ L, Sofa giường.
+                 + Máy chạy bộ, Giàn tạ đa năng, Cục nóng/lạnh điều hòa.
+                 + LƯU Ý: Tủ lạnh thường/nhỏ (< 200L, < 50kg) -> KHÔNG cần tháo lắp.
+               - TRƯỜNG HỢP ĐẶC BIỆT (RỦI RO KÉP):
+                 + Một món đồ có thể VỪA DỄ VỠ VỪA CẦN THÁO LẮP.
+                 + VD: "Tủ kính trưng bày" (Có kính dễ vỡ + Khung to cần tháo), "Đèn chùm pha lê", "Bàn trang điểm gương lớn".
+            
+            6. TỪ ĐIỂN TỪ VIẾT TẮT & THÔNG DỤNG:
+               - "bộ pc", "dàn pc", "dàn máy", "case" => Hiểu là: Máy tính để bàn. (Lưu ý: Dễ vỡ).
+                 + Nếu ghi "Bộ PC đầy đủ" -> Tách thành [Case PC, Màn hình].
+               - "con lap", "máy lap" => Laptop.
+               - "cục nóng", "cục lạnh" => Bộ phận Máy lạnh/Điều hòa (Cần tháo lắp, Nặng).
+               - "giường m6", "giường 1m6" => width_cm: 160.
+               - "giường m8", "giường 1m8" => width_cm: 180.
+               - "bếp từ", "bếp hồng ngoại" => is_fragile=TRUE (Mặt kính).
+            
+            7. DANH MỤC CHUẨN:
+               - category_name: "Điện tử", "Nội thất", "Đồ gia dụng", "Quần áo".
+            
+            Chỉ trả về JSON.
             """;
     }
 
@@ -225,10 +430,8 @@ public class IntakeAIParsingService {
         return sb.toString();
     }
 
-    // =================== Parse JSON ===================
     private List<ParsedItemRaw> parseRaw(String content) {
         try {
-            // Ưu tiên object { items: [...] }
             if (content.trim().startsWith("{")) {
                 var root = objectMapper.readTree(content);
                 if (root.has("items")) {
@@ -238,23 +441,20 @@ public class IntakeAIParsingService {
                     );
                 }
             }
-            // Nếu model trả về [] trực tiếp
             if (content.trim().startsWith("[")) {
                 return objectMapper.readValue(
                         content,
                         objectMapper.getTypeFactory().constructCollectionType(List.class, ParsedItemRaw.class)
                 );
             }
-            // Cuối cùng thử parse 1 item đơn
             ParsedItemRaw single = objectMapper.readValue(content, ParsedItemRaw.class);
             return List.of(single);
         } catch (Exception e) {
-            log.error("Cannot parse AI JSON. Len={}", content.length(), e);
+            log.error("Không đọc được JSON từ AI. Nội dung: {}", content, e);
             return List.of();
         }
     }
 
-    // =================== Preprocess + Fallback ===================
     private List<String> preprocessText(String text) {
         String normalized = text.replace("\r\n", "\n").trim();
         if (normalized.isEmpty()) {
@@ -274,7 +474,7 @@ public class IntakeAIParsingService {
         return lines;
     }
 
-    private List<IntakeParseTextResponse.ParsedItem> fallbackFromLines(List<String> lines) {
+    private List<IntakeParseTextResponse.ParsedItem> fallbackInternal(List<String> lines) {
         List<IntakeParseTextResponse.ParsedItem> out = new ArrayList<>(lines.size());
         for (String s : lines) {
             ParsedHeu h = heuristic(s);
@@ -285,46 +485,30 @@ public class IntakeAIParsingService {
                     .quantity(h.quantity)
                     .categoryName(h.category)
                     .size(h.size)
+                    .weightKg(h.weightKg > 0 ? h.weightKg : null)
+                    .widthCm(h.widthCm > 0 ? h.widthCm : null)
+                    .heightCm(h.heightCm > 0 ? h.heightCm : null)
+                    .depthCm(h.depthCm > 0 ? h.depthCm : null)
                     .isFragile(h.fragile)
                     .requiresDisassembly(h.disassembly)
-                    .confidence(0.9)
+                    .confidence(0.5)
+                    .reasoning("Fallback Heuristic: Phân tích thủ công do AI gặp sự cố.")
                     .build());
         }
         return out;
     }
 
-    private List<ParsedItemRaw> alignToCount(List<ParsedItemRaw> ai, List<String> lines) {
-        List<ParsedItemRaw> copy = new ArrayList<>(ai);
-        // Cắt thừa
-        if (copy.size() > lines.size()) {
-            copy = copy.subList(0, lines.size());
-        }
-        // Bù thiếu
-        while (copy.size() < lines.size()) {
-            ParsedHeu h = heuristic(lines.get(copy.size()));
-            ParsedItemRaw r = new ParsedItemRaw();
-            r.name = capitalizeName(h.name);
-            r.brand = h.brand;
-            r.model = null;
-            r.quantity = h.quantity;
-            r.categoryName = h.category;
-            r.size = h.size;
-            r.isFragile = h.fragile;
-            r.requiresDisassembly = h.disassembly;
-            r.confidence = 0.9;
-            copy.add(r);
-        }
-        return copy;
-    }
-
-    // =================== Heuristic utils ===================
     private static final Pattern QTY_PREFIX = Pattern.compile("^\\s*(\\d{1,3})\\s+(.+)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern INCH = Pattern.compile("(\\d{2,3})\\s*inch", Pattern.CASE_INSENSITIVE);
-    private static final Set<String> BRANDS = Set.of("samsung", "lg", "ikea", "sony", "xiaomi", "panasonic", "tcl", "sharp", "toshiba", "electrolux", "bosch", "whirlpool");
+    private static final Pattern DIM_3D = Pattern.compile("(\\d+)\\s*[x*]\\s*(\\d+)\\s*(?:[x*]\\s*(\\d+))?", Pattern.CASE_INSENSITIVE);
+    
+    private static final Set<String> BRANDS = Set.of("samsung", "lg", "ikea", "sony", "xiaomi", "panasonic", "tcl", "sharp", "toshiba", "electrolux", "bosch", "whirlpool", "casper", "hitachi", "funiki", "daikin", "mitsubishi");
 
     private ParsedHeu heuristic(String raw) {
-        String s = raw.trim();
+        String s = stripContextPrefix(raw.trim());
         int qty = 1;
+        double weight = 0;
+        
         Matcher m = QTY_PREFIX.matcher(s);
         if (m.find()) {
             try {
@@ -333,19 +517,82 @@ public class IntakeAIParsingService {
             }
             s = m.group(2).trim();
         }
-        s = stripLeadingArticles(s);
-        String brand = detectBrand(s);
-        String category = detectCategory(s);
-        String size = detectSize(s);
-        boolean fragile = isFragile(s);
-        boolean dis = requiresDisassembly(s);
-        return new ParsedHeu(s, brand, qty, category, size, fragile, dis);
+
+        Matcher mw = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(kg|cân|kgs)", Pattern.CASE_INSENSITIVE).matcher(s);
+        if (mw.find()) {
+            try {
+                weight = Double.parseDouble(mw.group(1));
+                s = s.replace(mw.group(0), "").trim();
+            } catch (NumberFormatException ignore) {}
+        }
+
+        double width = 0;
+        double height = 0;
+        double depth = 0;
+
+        Matcher m3d = DIM_3D.matcher(s);
+        if (m3d.find()) {
+            try {
+                double d1 = Double.parseDouble(m3d.group(1));
+                double d2 = Double.parseDouble(m3d.group(2));
+                
+                width = Math.max(d1, d2);
+                depth = Math.min(d1, d2);
+                
+                if (m3d.group(3) != null) {
+                    height = Double.parseDouble(m3d.group(3));
+                }
+                s = s.replace(m3d.group(0), "").trim();
+            } catch (NumberFormatException ignore) {}
+        } else {
+            Matcher md = Pattern.compile("(\\d+)[mM](\\d+)|(\\d+(?:\\.\\d+)?)\\s*[mM]|(\\d+)\\s*cm", Pattern.CASE_INSENSITIVE).matcher(s);
+            if (md.find()) {
+                try {
+                    if (md.group(1) != null) { 
+                         width = Double.parseDouble(md.group(1)) * 100 + Double.parseDouble(md.group(2)) * 10;
+                    } else if (md.group(3) != null) { 
+                         width = Double.parseDouble(md.group(3)) * 100;
+                    } else if (md.group(4) != null) { 
+                         width = Double.parseDouble(md.group(4));
+                    }
+                    s = s.replace(md.group(0), "").trim();
+                } catch (NumberFormatException ignore) {}
+            }
+        }
+        
+        s = stripLeadingArticles(s); 
+        
+        String sNormalized = removeAccents(s).toLowerCase(Locale.ROOT);
+        
+        String brand = detectBrand(sNormalized); 
+        String category = detectCategory(sNormalized);
+        String size = detectSize(sNormalized, weight);
+        boolean fragile = isFragile(sNormalized);
+        boolean dis = requiresDisassembly(sNormalized, weight);
+        
+        s = s.replaceAll("\\s{2,}", " ").trim();
+        
+        return new ParsedHeu(s, brand, qty, category, size, fragile, dis, weight, width, height, depth);
     }
 
-    private static String detectBrand(String name) {
-        String lower = name.toLowerCase(Locale.ROOT);
+    private record ParsedHeu(String name, String brand, int quantity, String category, String size, boolean fragile, boolean disassembly, double weightKg, double widthCm, double heightCm, double depthCm) {
+    }
+
+    private static String removeAccents(String input) {
+        if (input == null) return "";
+        String nfd = java.text.Normalizer.normalize(input, java.text.Normalizer.Form.NFD);
+        return nfd.replaceAll("\\p{InCombiningDiacriticalMarks}+", "").replace("đ", "d").replace("Đ", "D");
+    }
+
+    private String stripContextPrefix(String s) {
+        String regex = "^(?i)(chuyển\\s+(?:văn\\s+phòng|nhà|kho|trọn\\s+gói)|danh\\s+sách|gói|lô|đơn|stt|mục|phòng|chuyen\\s+(?:van\\s+phong|nha|kho|tron\\s+goi))(?:[^:]*)?:\\s*";
+        String res = s.replaceFirst(regex, "");
+        return res;
+    }
+
+    private static String detectBrand(String normalizedName) {
         for (String b : BRANDS) {
-            if (lower.contains(b)) {
+            if (normalizedName.contains(b)) {
                 return capitalizeWord(b);
             }
         }
@@ -354,41 +601,91 @@ public class IntakeAIParsingService {
 
     private static String detectCategory(String n) {
         String s = n.toLowerCase(Locale.ROOT);
-        // Electronics: PC, computers, TVs, appliances
-        if (containsAny(s, "pc", "tivi", "tv", "màn hình", "tủ lạnh", "máy giặt", "máy sấy", "máy lạnh", "điều hòa", "laptop", "máy tính", "loa", "máy nước nóng", "máy tính bảng", "tablet")) {
-            return "Điện tử";
+        
+        // 1. Hàng nặng & Đặc biệt (Ưu tiên check trước vì đặc thù)
+        if (containsAny(s, "ket sat", "piano", "dan organ", "dan guitar", "be ca", "ho ca", "may chay bo", "ghe massage", "gian ta", "xe may", "xe dap", "xe dien", "tuong", "hon non bo", "cay canh", "chau cay", "may phat dien")) {
+            return "Hàng nặng & Đặc biệt";
         }
-        // Furniture: tables, chairs, beds, cabinets
-        if (containsAny(s, "bàn", "ghế", "sofa", "giường", "tủ", "kệ", "kệ sách", "bộ bàn ghế")) {
+
+        // 2. Chăn ga gối đệm
+        if (containsAny(s, "chan", "ga", "goi", "dem", "nem", "man", "mung", "drap", "chieu truc", "chieu coi") && !s.contains("man hinh")) {
+            return "Chăn ga gối đệm";
+        }
+
+        // 3. Sách vở & Tài liệu
+        if (containsAny(s, "sach", "vo", "tai lieu", "ho so", "giay", "truyen", "tap chi", "van phong pham", "but", "cap sach", "balo")) {
+            return "Sách vở & Tài liệu";
+        }
+
+        // 4. Quần áo & Phụ kiện
+        if (containsAny(s, "quan", "ao", "vay", "dam", "giay", "dep", "tui xach", "vali", "mu", "non", "khan", "tat", "vo", "ca vat", "that lung", "dong ho", "trang suc", "thoi trang")) {
+            return "Quần áo & Phụ kiện";
+        }
+
+        // 5. Điện lạnh (Máy lớn)
+        if (containsAny(s, "tu lanh", "tu dong", "tu mat", "may giat", "may say", "dieu hoa", "may lanh", "cuc nong", "cuc lanh", "binh nong lanh", "may nuoc nong", "quat", "hut mui", "may rua bat", "may loc nuoc", "may hut am", "may loc khong khi")) {
+            return "Điện lạnh";
+        }
+
+        // 6. Thiết bị điện tử
+        if (containsAny(s, "tivi", "tv", "man hinh", "monitor", "loa", "amply", "dan am thanh", "sub", "mic", "karaoke", "camera", "pc", "computer", "may tinh", "laptop", "macbook", "may in", "may photo", "may scan", "tablet", "ipad", "wifi", "modem", "router", "may chieu", "ps4", "ps5", "xbox", "ban phim", "chuot")) {
+            return "Thiết bị điện tử";
+        }
+
+        // 7. Đồ bếp, Hàng dễ vỡ & Đồ sinh hoạt nhỏ
+        if (containsAny(s, 
+            // Đồ bếp
+            "xoong", "noi", "chao", "bat", "dia", "chen", "ly", "coc", "tach", "binh", "lo", "am", "gio", "sot", "mam", "khay", "dua", "thia", "muong", "dao", "thot",
+            // Thiết bị bếp nhỏ
+            "bep tu", "bep hong ngoai", "bep ga", "lo vi song", "lo nuong", "noi com", "noi chien", "may xay", "may ep", "may lam sua", 
+            // Đồ dễ vỡ khác
+            "guong", "kinh", "tranh", "anh", "den", "lo hoa", "binh hoa", "my pham", "nuoc hoa", "thuy tinh", "pha le", "gom", "su", 
+            // Đồ sinh hoạt chung (TRỪ thùng carton)
+            "moc", "cay lau nha", "choi", "hot rac", "xo", "chau", "thau", "gia dung")) {
+            
+            // EXCEPTION: "Ghe xoay" contains "xo" -> misclassified as kitchenware
+            // Check specifically for furniture items that might contain these syllables
+            if (!containsAny(s, "ghe", "ban", "tu")) {
+                return "Đồ bếp & Dễ vỡ";
+            }
+        }
+        
+        // 8. Đóng gói (Mới thêm)
+        if (containsAny(s, "thung", "hop", "carton", "xop", "bang dinh", "mang boc", "bao tai")) {
+            return "Khác"; // Hoặc có thể tạo Category riêng "Vật tư đóng gói" nếu cần
+        }
+
+        // 9. Nội thất (Bàn ghế, giường tủ...)
+        if (containsAny(s, "ban", "ghe", "sofa", "salon", "divan", "giuong", "phan", "sap", "tu", "ke", "gia", "vo", "man rem", "rem cua", "tham", "vach ngan", "ban tho")) {
             return "Nội thất";
         }
-        // Household items: dishes, bottles, etc.
-        if (containsAny(s, "bình", "lọ", "chén", "bát", "đĩa", "ấm", "bộ ấm chén")) {
-            return "Đồ gia dụng";
-        }
-        // Clothing
-        if (containsAny(s, "quần", "áo", "giày", "dép", "túi")) {
-            return "Quần áo";
-        }
+
         return "Khác";
     }
 
-    private static String detectSize(String n0) {
+    private static String detectSize(String n0, double w) {
         String n = n0.toLowerCase(Locale.ROOT);
+        
+        if (w > 0) {
+            if (w < 10) return "S";
+            if (w <= 30) return "M";
+            return "L";
+        }
+        
         Matcher m = INCH.matcher(n);
-        if (n.contains("tivi") || n.contains("tv") || n.contains("màn hình")) {
+        if (n.contains("tivi") || n.contains("tv") || n.contains("man hinh")) {
             if (m.find()) {
                 return Integer.parseInt(m.group(1)) >= 50 ? "L" : "M";
             }
             return "M";
         }
-        if (containsAny(n, "tủ lạnh", "máy giặt", "giường", "bộ sofa", "bộ bàn ghế", "sofa lớn")) {
+        if (containsAny(n, "tu lanh", "may giat", "giuong", "bo sofa", "bo ban ghe", "sofa lon", "tu dong", "tu mat")) {
             return "L";
         }
-        if (containsAny(n, "bình", "lọ", "chén", "bát", "đĩa", "ấm", "bộ ấm chén", "áo", "quần")) {
+        if (containsAny(n, "binh", "lo", "chen", "bat", "dia", "am", "bo am chen", "ao", "quan", "giay", "dep")) {
             return "S";
         }
-        if (containsAny(n, "bàn", "ghế", "tủ", "kệ")) {
+        if (containsAny(n, "ban", "ghe", "tu", "ke")) {
             return "M";
         }
         return "M";
@@ -396,44 +693,39 @@ public class IntakeAIParsingService {
 
     private static boolean isFragile(String n0) {
         String n = n0.toLowerCase(Locale.ROOT);
-        // Explicit fragile keywords
-        if (containsAny(n, "dễ vỡ", "fragile", "cẩn thận")) {
-            return true;
-        }
-        // Electronics are fragile: PC, TV, monitors, laptops, tablets
-        if (containsAny(n, "pc", "tivi", "tv", "màn hình", "laptop", "máy tính", "máy tính bảng", "tablet")) {
-            return true;
-        }
-        // Glass, ceramics, mirrors
-        if (containsAny(n, "kính", "gương", "gốm", "sứ", "chén", "bát", "đĩa", "ấm", "đèn", "tranh")) {
-            return true;
-        }
-        return false;
+        if (containsAny(n, "de vo", "fragile", "can than")) return true;
+        if (containsAny(n, "pc", "tivi", "tv", "man hinh", "laptop", "may tinh", "may tinh bang", "tablet", "loa", "amply")) return true;
+        if (containsAny(n, "tu lanh", "tu mat", "tu dong", "bep tu", "bep hong ngoai", "may hut mui")) return true;
+        return containsAny(n, "kinh", "guong", "gom", "su", "chen", "bat", "dia", "am", "den", "tranh", "be ca");
     }
 
-    private static boolean requiresDisassembly(String n0) {
+    private static boolean requiresDisassembly(String n0, double w) {
         String n = n0.toLowerCase(Locale.ROOT);
-        if (containsAny(n, "tháo", "tháo lắp", "tháo rời", "tháo chân")) {
-            return true;
+        if (containsAny(n, "thao", "thao lap", "thao roi", "thao chan")) return true;
+        
+        if (w > 0 && w < 50 && !n.contains("giuong")) return false;
+        
+        if (containsAny(n, "giuong", "tu quan ao", "tu ao", "ban hop", "ban giam doc", "sofa goc", "sofa l")) return true;
+        
+        if (containsAny(n, "tu lanh", "tu mat", "tu dong")) {
+            return containsAny(n, "side by side", "sbs", "2 canh", "4 canh", "cong nghiep") || w > 100;
         }
-        if (containsAny(n, "tủ lạnh", "máy giặt", "máy sấy", "giường", "tủ", "kệ", "bàn", "sofa")) {
-            return true;
-        }
+        
+        if (containsAny(n, "cuc nong", "cuc lanh", "dieu hoa", "may lanh")) return true;
+
         if (containsAny(n, "tivi", "tv")) {
             Matcher m = INCH.matcher(n);
             if (m.find()) {
-                return Integer.parseInt(m.group(1)) >= 40;
+                return Integer.parseInt(m.group(1)) >= 55;
             }
-            return true;
+            return false;
         }
         return false;
     }
 
     private static boolean containsAny(String s, String... kws) {
         for (String k : kws) {
-            if (s.contains(k)) {
-                return true;
-            }
+            if (s.contains(k)) return true;
         }
         return false;
     }
@@ -443,20 +735,15 @@ public class IntakeAIParsingService {
     }
 
     private static String capitalizeWord(String s) {
-        if (s == null || s.isBlank()) {
-            return s;
-        }
+        if (s == null || s.isBlank()) return s;
         return s.substring(0, 1).toUpperCase(Locale.ROOT) + s.substring(1).toLowerCase(Locale.ROOT);
     }
 
     private static String capitalizeName(String s) {
-        if (s == null || s.isBlank()) {
-            return s;
-        }
+        if (s == null || s.isBlank()) return s;
         return s.substring(0, 1).toUpperCase(Locale.ROOT) + s.substring(1);
     }
 
-    // =================== Mapping ===================
     private IntakeParseTextResponse.ParsedItem toDomain(ParsedItemRaw r) {
         return IntakeParseTextResponse.ParsedItem.builder()
                 .name(Objects.requireNonNullElse(r.name, ""))
@@ -467,7 +754,12 @@ public class IntakeAIParsingService {
                 .size(Objects.requireNonNullElse(r.size, "M"))
                 .isFragile(Boolean.TRUE.equals(r.isFragile))
                 .requiresDisassembly(Boolean.TRUE.equals(r.requiresDisassembly))
-                .confidence(r.confidence != null ? clamp(r.confidence, 0.8, 0.95) : 0.9)
+                .confidence(r.confidence != null ? clamp(r.confidence.doubleValue(), 0.0, 1.0) : 0.5)
+                .reasoning(r.reasoning)
+                .weightKg(r.weightKg)
+                .widthCm(r.widthCm)
+                .heightCm(r.heightCm)
+                .depthCm(r.depthCm)
                 .build();
     }
 
@@ -501,21 +793,17 @@ public class IntakeAIParsingService {
         return new RestTemplate(f);
     }
 
-    // =================== DTOs ===================
     @JsonIgnoreProperties(ignoreUnknown = true)
     static class ChatCompletionResponse {
-
         public List<Choice> choices;
 
         @JsonIgnoreProperties(ignoreUnknown = true)
         static class Choice {
-
             public Message message;
         }
 
         @JsonIgnoreProperties(ignoreUnknown = true)
         static class Message {
-
             public String role;
             public String content;
         }
@@ -523,7 +811,6 @@ public class IntakeAIParsingService {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     static class ParsedItemRaw {
-
         public String name;
         public String brand;
         public String model;
@@ -541,11 +828,19 @@ public class IntakeAIParsingService {
         public Boolean requiresDisassembly;
 
         public Double confidence;
-    }
 
-    // Heuristic holder
-    private record ParsedHeu(String name, String brand, int quantity, String category, String size, boolean fragile, boolean disassembly) {
-
+        public String reasoning;
+        
+        @JsonProperty("weight_kg")
+        public Double weightKg;
+        
+        @JsonProperty("width_cm")
+        public Double widthCm;
+        
+        @JsonProperty("height_cm")
+        public Double heightCm;
+        
+        @JsonProperty("depth_cm")
+        public Double depthCm;
     }
 }
-

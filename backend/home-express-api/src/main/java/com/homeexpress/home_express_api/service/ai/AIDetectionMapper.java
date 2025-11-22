@@ -13,8 +13,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Utility component that maps enhanced AI detection payloads into {@link BookingItem}
- * entities and serialised metadata suitable for persistence.
+ * Service chuyển đổi dữ liệu (Mapper).
+ * Nhiệm vụ: Chuyển kết quả từ AI (EnhancedDetectedItem) thành BookingItem để lưu xuống DB.
+ * Đồng thời đóng gói các thông tin phụ (confidence, bounding box...) thành chuỗi JSON.
  */
 @Slf4j
 @Service
@@ -24,13 +25,13 @@ public class AIDetectionMapper {
     private final ObjectMapper objectMapper;
 
     /**
-     * Map an {@link EnhancedDetectedItem} into a partially populated {@link BookingItem}.
+     * Chuyển đổi một item từ AI sang BookingItem.
      *
-     * @param aiItem     AI detection payload for a single item
-     * @param bookingId  owning booking identifier
-     * @param categoryId detected category identifier (optional, may be null)
-     * @param sizeId     mapped size identifier (optional, may be null)
-     * @return booking item instance populated with core fields
+     * @param aiItem     Dữ liệu gốc từ AI
+     * @param bookingId  ID của đơn hàng
+     * @param categoryId ID danh mục (đã map trước đó)
+     * @param sizeId     ID kích thước (đã map trước đó)
+     * @return BookingItem entity sẵn sàng để lưu
      */
     public BookingItem toBookingItem(EnhancedDetectedItem aiItem,
                                      Long bookingId,
@@ -42,8 +43,9 @@ public class AIDetectionMapper {
         item.setSizeId(sizeId);
         item.setName(aiItem.getName());
         item.setDescription(aiItem.getNotes());
-        item.setQuantity(1);
+        item.setQuantity(1); // Mặc định là 1, số lượng sẽ được gộp sau
 
+        // Chuyển đổi kích thước (nếu AI đo được)
         if (aiItem.getDimsCm() != null) {
             EnhancedDetectedItem.Dimensions dims = aiItem.getDimsCm();
             item.setHeightCm(toBigDecimal(dims.getHeight()));
@@ -53,6 +55,7 @@ public class AIDetectionMapper {
 
         item.setWeightKg(toBigDecimal(aiItem.getWeightKg()));
 
+        // Các cờ xử lý đặc biệt
         if (aiItem.getFragile() != null) {
             item.setIsFragile(aiItem.getFragile());
         }
@@ -64,31 +67,30 @@ public class AIDetectionMapper {
     }
 
     /**
-     * Serialise auxiliary AI attributes to JSON for storage in {@code booking_items.ai_metadata}.
-     *
-     * @param aiItem AI detection payload
-     * @return JSON string or {@code null} when the payload is empty / serialisation fails
+     * Đóng gói toàn bộ thông tin phụ của AI vào chuỗi JSON.
+     * Chuỗi này sẽ được lưu vào cột `ai_metadata` trong bảng `booking_items`.
+     * Giúp giữ lại bằng chứng nhận diện (độ tin cậy, vị trí trong ảnh...) để debug sau này.
      */
     public String toAIMetadataJson(EnhancedDetectedItem aiItem) {
         Map<String, Object> metadata = new HashMap<>();
 
         putIfNotNull(metadata, "confidence", aiItem.getConfidence());
         putIfNotNull(metadata, "subcategory", aiItem.getSubcategory());
-        putIfNotNull(metadata, "bbox_norm", toBoundingBoxMap(aiItem));
+        putIfNotNull(metadata, "bbox_norm", toBoundingBoxMap(aiItem)); // Vị trí trong ảnh
         putIfNotNull(metadata, "dims_confidence", aiItem.getDimsConfidence());
         putIfNotNull(metadata, "dimensions_basis", aiItem.getDimensionsBasis());
         putIfNotNull(metadata, "volume_m3", aiItem.getVolumeM3());
         putIfNotNull(metadata, "weight_confidence", aiItem.getWeightConfidence());
         putIfNotNull(metadata, "weight_basis", aiItem.getWeightBasis());
         putIfNotNull(metadata, "weight_model", aiItem.getWeightModel());
-        putIfNotNull(metadata, "occluded_fraction", aiItem.getOccludedFraction());
+        putIfNotNull(metadata, "occluded_fraction", aiItem.getOccludedFraction()); // Độ bị che khuất
         putIfNotNull(metadata, "orientation", aiItem.getOrientation());
         putIfNotNull(metadata, "material", aiItem.getMaterial());
         putIfNotNull(metadata, "color", aiItem.getColor());
-        putIfNotNull(metadata, "room_hint", aiItem.getRoomHint());
+        putIfNotNull(metadata, "room_hint", aiItem.getRoomHint()); // Gợi ý phòng (Bếp/Ngủ)
         putIfNotNull(metadata, "brand", aiItem.getBrand());
         putIfNotNull(metadata, "model", aiItem.getModel());
-        putIfNotNull(metadata, "two_person_lift", aiItem.getTwoPersonLift());
+        putIfNotNull(metadata, "two_person_lift", aiItem.getTwoPersonLift()); // Cần 2 người khiêng?
         putIfNotNull(metadata, "stackable", aiItem.getStackable());
         putIfNotNull(metadata, "notes", aiItem.getNotes());
         putIfNotNull(metadata, "image_index", aiItem.getImageIndex());
@@ -100,11 +102,12 @@ public class AIDetectionMapper {
         try {
             return objectMapper.writeValueAsString(metadata);
         } catch (JsonProcessingException e) {
-            log.warn("Failed to serialise AI metadata for item '{}': {}", aiItem.getName(), e.getMessage());
+            log.warn("Lỗi khi đóng gói metadata cho item '{}': {}", aiItem.getName(), e.getMessage());
             return null;
         }
     }
 
+    // Chuyển đổi Bounding Box (Vị trí khung hình chữ nhật bao quanh vật thể)
     private Map<String, Object> toBoundingBoxMap(EnhancedDetectedItem item) {
         if (item.getBboxNorm() == null) {
             return null;
@@ -126,7 +129,7 @@ public class AIDetectionMapper {
         if (value != null) {
             if (value instanceof Iterable<?> iterable) {
                 if (!iterable.iterator().hasNext()) {
-                    return;
+                    return; // Bỏ qua list rỗng
                 }
             }
             map.put(key, value);

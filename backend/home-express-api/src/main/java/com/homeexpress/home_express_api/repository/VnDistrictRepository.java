@@ -14,6 +14,8 @@ public interface VnDistrictRepository extends JpaRepository<VnDistrictRepository
 
     List<VnDistrict> findByProvinceCodeOrderByDistrictNameAsc(String provinceCode);
 
+    java.util.Optional<VnDistrict> findFirstByDistrictNameContainingIgnoreCaseAndProvinceCode(String districtName, String provinceCode);
+
     @Entity
     @Table(name = "vn_districts")
     class VnDistrict {

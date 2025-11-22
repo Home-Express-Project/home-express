@@ -195,7 +195,7 @@ public class EvidenceService {
 
         // Enrich with uploader details
         userRepository.findById(evidence.getUploadedByUserId()).ifPresent(user -> {
-            response.setUploaderName(user.getFullName());
+            response.setUploaderName(user.getEmail()); // Use email as fallback since fullName is removed
             response.setUploaderRole(user.getRole().name());
         });
 

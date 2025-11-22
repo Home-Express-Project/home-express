@@ -7,8 +7,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -21,22 +21,22 @@ import static org.mockito.Mockito.*;
 class AIDetectionServiceTest {
 
     @Mock
-    private GptService gptService;
+    private GPTVisionService gptService;
 
     @Mock
     private DetectionCacheService cacheService;
 
-    @Mock
-    private BudgetLimitService budgetLimitService;
-
-    private AIDetectionOrchestrator aiDetectionService;
+    private AIDetectionService aiDetectionService;
 
     private List<String> mockImageUrls;
     private DetectionResult mockDetectionResult;
 
     @BeforeEach
     void setUp() {
-        aiDetectionService = new AIDetectionOrchestrator(gptService, cacheService, budgetLimitService);
+        aiDetectionService = new AIDetectionService(gptService, cacheService);
+        // Inject values for @Value fields
+        ReflectionTestUtils.setField(aiDetectionService, "confidenceThreshold", 0.85);
+        ReflectionTestUtils.setField(aiDetectionService, "cacheTtlSeconds", 3600);
         
         // Setup mock image URLs
         mockImageUrls = Arrays.asList(
@@ -71,12 +71,12 @@ class AIDetectionServiceTest {
 
     @Test
     void testDetectItems_Success() {
-        // Given - Mock the hybrid detection to return our mock result
-        AIDetectionOrchestrator spyService = spy(aiDetectionService);
-        doReturn(mockDetectionResult).when(spyService).detectItemsHybrid(anyList());
+        // Given - Cache miss, GPT success
+        when(cacheService.get(anyString())).thenReturn(null);
+        when(gptService.detectItems(anyList())).thenReturn(mockDetectionResult);
 
         // When
-        DetectionResult result = spyService.detectItems(mockImageUrls);
+        DetectionResult result = aiDetectionService.detectItems(mockImageUrls);
 
         // Then
         assertNotNull(result);
@@ -85,108 +85,84 @@ class AIDetectionServiceTest {
         assertEquals(0.95, result.getConfidence());
         assertEquals(2, result.getItems().size());
         assertEquals("Sofa", result.getItems().get(0).getName());
-        assertEquals("Furniture", result.getItems().get(0).getCategory());
+        
+        verify(gptService).detectItems(anyList());
+        verify(cacheService).put(anyString(), any(DetectionResult.class), anyLong());
     }
 
     @Test
     void testDetectItems_FromCache() {
-        // Given - Mock cached result
-        AIDetectionOrchestrator spyService = spy(aiDetectionService);
+        // Given - Cache hit
         DetectionResult cachedResult = DetectionResult.builder()
                 .items(mockDetectionResult.getItems())
                 .fromCache(true)
                 .confidence(0.95)
-                .serviceUsed("CACHE")
+                .serviceUsed("GPT")
                 .build();
-        doReturn(cachedResult).when(spyService).detectItemsHybrid(anyList());
+        when(cacheService.get(anyString())).thenReturn(cachedResult);
 
         // When
-        DetectionResult result = spyService.detectItems(mockImageUrls);
+        DetectionResult result = aiDetectionService.detectItems(mockImageUrls);
 
         // Then
         assertNotNull(result);
         assertTrue(result.getFromCache());
         assertEquals(2, result.getItems().size());
-    }
-
-    @Test
-    void testEstimateVolume_Success() {
-        // Given
-        AIDetectionOrchestrator spyService = spy(aiDetectionService);
-        doReturn(mockDetectionResult).when(spyService).detectItemsHybrid(anyList());
-
-        // When
-        DetectionResult result = spyService.detectItems(mockImageUrls);
-
-        // Then - Verify items detected
-        assertNotNull(result);
-        assertEquals(0.95, result.getConfidence());
-        assertEquals(2, result.getItems().size());
         
-        // Verify individual items
-        assertEquals("Sofa", result.getItems().get(0).getName());
-        assertEquals(0.95, result.getItems().get(0).getConfidence());
-        assertEquals("Coffee Table", result.getItems().get(1).getName());
-        assertEquals(0.90, result.getItems().get(1).getConfidence());
+        verify(gptService, never()).detectItems(anyList());
     }
 
     @Test
     void testDetectItems_EmptyImageList() {
-        // Given
-        List<String> emptyUrls = new ArrayList<>();
-        AIDetectionOrchestrator spyService = spy(aiDetectionService);
+        // Given - GPT returns empty items
         DetectionResult emptyResult = DetectionResult.builder()
-                .items(new ArrayList<>())
-                .manualInputRequired(true)
-                .failureReason("No images provided")
-                .build();
-        doReturn(emptyResult).when(spyService).detectItemsHybrid(anyList());
+             .items(new ArrayList<>())
+             .confidence(0.0)
+             .build();
+             
+        when(cacheService.get(anyString())).thenReturn(null);
+        when(gptService.detectItems(anyList())).thenReturn(emptyResult);
 
         // When
-        DetectionResult result = spyService.detectItems(emptyUrls);
+        DetectionResult result = aiDetectionService.detectItems(mockImageUrls);
 
         // Then
-        assertNotNull(result);
         assertTrue(result.getManualInputRequired());
-    }
-
-    @Test
-    void testDetectItems_BudgetExceeded() {
-        // Given - Budget exceeded scenario
-        AIDetectionOrchestrator spyService = spy(aiDetectionService);
-        DetectionResult budgetError = DetectionResult.builder()
-                .items(new ArrayList<>())
-                .manualInputRequired(true)
-                .failureReason("Budget limit exceeded")
-                .build();
-        doReturn(budgetError).when(spyService).detectItemsHybrid(anyList());
-
-        // When
-        DetectionResult result = spyService.detectItems(mockImageUrls);
-
-        // Then
-        assertNotNull(result);
-        assertTrue(result.getManualInputRequired());
+        assertEquals("NO_ITEMS_DETECTED", result.getFailureReason());
     }
 
     @Test
     void testDetectItems_LowConfidence() {
-        // Given - Low confidence result
-        AIDetectionOrchestrator spyService = spy(aiDetectionService);
+        // Given - Low confidence result from GPT
         DetectionResult lowConfidenceResult = DetectionResult.builder()
-                .items(new ArrayList<>())
+                .items(mockDetectionResult.getItems())
                 .confidence(0.45)
                 .serviceUsed("GPT")
-                .manualReviewRequired(true)
                 .build();
-        doReturn(lowConfidenceResult).when(spyService).detectItemsHybrid(anyList());
+                
+        when(cacheService.get(anyString())).thenReturn(null);
+        when(gptService.detectItems(anyList())).thenReturn(lowConfidenceResult);
 
         // When
-        DetectionResult result = spyService.detectItems(mockImageUrls);
+        DetectionResult result = aiDetectionService.detectItems(mockImageUrls);
 
         // Then
         assertNotNull(result);
-        assertTrue(result.getManualReviewRequired()); // Low confidence, needs review
-        assertEquals(0.45, result.getConfidence());
+        assertTrue(result.getManualReviewRequired());
+        assertEquals("AI_VISION_LOW_CONFIDENCE", result.getFailureReason());
+    }
+    
+    @Test
+    void testDetectItems_GptFailure() {
+        // Given - GPT throws exception
+        when(cacheService.get(anyString())).thenReturn(null);
+        when(gptService.detectItems(anyList())).thenThrow(new RuntimeException("API Error"));
+
+        // When
+        DetectionResult result = aiDetectionService.detectItems(mockImageUrls);
+
+        // Then
+        assertTrue(result.getManualInputRequired());
+        assertEquals("AI_VISION_FAILED", result.getFailureReason());
     }
 }

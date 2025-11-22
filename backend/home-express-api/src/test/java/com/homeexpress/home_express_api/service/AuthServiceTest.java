@@ -8,6 +8,7 @@ import com.homeexpress.home_express_api.entity.*;
 import com.homeexpress.home_express_api.repository.CustomerRepository;
 import com.homeexpress.home_express_api.repository.TransportRepository;
 import com.homeexpress.home_express_api.repository.UserRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -42,6 +43,9 @@ class AuthServiceTest {
 
     @Mock
     private UserSessionService userSessionService;
+
+    @Mock
+    private HttpServletRequest httpRequest;
 
     @InjectMocks
     private AuthService authService;
@@ -108,6 +112,11 @@ class AuthServiceTest {
         mockSession.setSessionId("session-uuid-1");
         mockSession.setUser(mockUser);
         mockSession.setPlainRefreshToken("mock-refresh-token");
+
+        // Setup IP and User Agent mocks
+        lenient().when(httpRequest.getHeader("X-Forwarded-For")).thenReturn(null);
+        lenient().when(httpRequest.getRemoteAddr()).thenReturn("127.0.0.1");
+        lenient().when(httpRequest.getHeader("User-Agent")).thenReturn("TestAgent");
     }
 
     @Test
@@ -116,26 +125,20 @@ class AuthServiceTest {
         when(userRepository.existsByEmail(anyString())).thenReturn(false);
         when(passwordEncoder.encode(anyString())).thenReturn("$2a$10$hashedPassword");
         when(userRepository.save(any(User.class))).thenReturn(mockUser);
-        when(customerRepository.existsByPhone(anyString())).thenReturn(false);
         when(customerRepository.save(any(Customer.class))).thenReturn(mockCustomer);
         when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
                 .thenReturn("mock-access-token");
-        when(userSessionService.createSession(any(User.class), anyString(), anyString(), anyString()))
+        when(userSessionService.createSession(any(User.class), anyString(), anyString(), nullable(String.class)))
                 .thenReturn(mockSession);
 
         // When
-        AuthResponse response = authService.register(
-                customerRegisterRequest, 
-                "127.0.0.1", 
-                "test-agent", 
-                "device-123"
-        );
+        AuthResponse response = authService.register(customerRegisterRequest);
 
         // Then
         assertNotNull(response);
         assertEquals("mock-access-token", response.getAccessToken());
         assertEquals("mock-refresh-token", response.getRefreshToken());
-        assertEquals("Registration successful", response.getMessage());
+        assertEquals("Registration successful. Please verify your email.", response.getMessage());
         assertNotNull(response.getUser());
         assertEquals(1L, response.getUser().getUserId());
 
@@ -163,30 +166,23 @@ class AuthServiceTest {
         when(userRepository.existsByEmail(anyString())).thenReturn(false);
         when(passwordEncoder.encode(anyString())).thenReturn("$2a$10$hashedPassword");
         when(userRepository.save(any(User.class))).thenReturn(transportUser);
-        when(transportRepository.existsByBusinessLicenseNumber(anyString())).thenReturn(false);
         when(transportRepository.save(any(Transport.class))).thenReturn(mockTransport);
         when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
                 .thenReturn("transport-access-token");
-        when(userSessionService.createSession(any(User.class), anyString(), anyString(), anyString()))
+        when(userSessionService.createSession(any(User.class), anyString(), anyString(), nullable(String.class)))
                 .thenReturn(transportSession);
 
         // When
-        AuthResponse response = authService.register(
-                transportRegisterRequest,
-                "127.0.0.1",
-                "test-agent",
-                "device-456"
-        );
+        AuthResponse response = authService.register(transportRegisterRequest);
 
         // Then
         assertNotNull(response);
         assertEquals("transport-access-token", response.getAccessToken());
         assertEquals("transport-refresh-token", response.getRefreshToken());
-        assertEquals("Registration successful", response.getMessage());
+        assertEquals("Registration successful. Please verify your email.", response.getMessage());
         assertNotNull(response.getUser());
 
         verify(userRepository, times(1)).existsByEmail("transport@test.com");
-        verify(transportRepository, times(1)).existsByBusinessLicenseNumber("BL123456");
         verify(transportRepository, times(1)).save(any(Transport.class));
     }
 
@@ -196,19 +192,13 @@ class AuthServiceTest {
         when(userRepository.findByEmail(anyString())).thenReturn(Optional.of(mockUser));
         when(passwordEncoder.matches(anyString(), anyString())).thenReturn(true);
         when(userRepository.save(any(User.class))).thenReturn(mockUser);
-        when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
+        lenient().when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
                 .thenReturn("login-access-token");
-        when(userSessionService.createSession(any(User.class), anyString(), anyString(), anyString()))
+        when(userSessionService.createSession(any(User.class), anyString(), anyString(), nullable(String.class)))
                 .thenReturn(mockSession);
-        when(customerRepository.findById(anyLong())).thenReturn(Optional.of(mockCustomer));
 
         // When
-        AuthResponse response = authService.login(
-                loginRequest,
-                "127.0.0.1",
-                "test-agent",
-                "device-login"
-        );
+        AuthResponse response = authService.login(loginRequest);
 
         // Then
         assertNotNull(response);
@@ -245,19 +235,13 @@ class AuthServiceTest {
         when(userRepository.findByEmail("transport@test.com")).thenReturn(Optional.of(transportUser));
         when(passwordEncoder.matches(anyString(), anyString())).thenReturn(true);
         when(userRepository.save(any(User.class))).thenReturn(transportUser);
-        when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
+        lenient().when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
                 .thenReturn("transport-login-access");
-        when(userSessionService.createSession(any(User.class), anyString(), anyString(), anyString()))
+        when(userSessionService.createSession(any(User.class), anyString(), anyString(), nullable(String.class)))
                 .thenReturn(transportSession);
-        when(transportRepository.findById(anyLong())).thenReturn(Optional.of(mockTransport));
 
         // When
-        AuthResponse response = authService.login(
-                transportLogin,
-                "127.0.0.1",
-                "test-agent",
-                "transport-device"
-        );
+        AuthResponse response = authService.login(transportLogin);
 
         // Then
         assertNotNull(response);
@@ -291,18 +275,13 @@ class AuthServiceTest {
         when(userRepository.findByEmail("manager@test.com")).thenReturn(Optional.of(managerUser));
         when(passwordEncoder.matches(anyString(), anyString())).thenReturn(true);
         when(userRepository.save(any(User.class))).thenReturn(managerUser);
-        when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
+        lenient().when(jwtTokenProvider.generateAccessToken(anyLong(), anyString(), anyString()))
                 .thenReturn("manager-access-token");
-        when(userSessionService.createSession(any(User.class), anyString(), anyString(), anyString()))
+        when(userSessionService.createSession(any(User.class), anyString(), anyString(), nullable(String.class)))
                 .thenReturn(managerSession);
 
         // When
-        AuthResponse response = authService.login(
-                managerLogin,
-                "127.0.0.1",
-                "test-agent",
-                "manager-device"
-        );
+        AuthResponse response = authService.login(managerLogin);
 
         // Then
         assertNotNull(response);

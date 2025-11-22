@@ -16,7 +16,6 @@ import com.homeexpress.home_express_api.repository.IntakeSessionRepository;
 import com.homeexpress.home_express_api.repository.IntakeSessionItemRepository;
 import com.homeexpress.home_express_api.repository.UserRepository;
 import com.homeexpress.home_express_api.service.BookingService;
-import com.homeexpress.home_express_api.service.ai.HybridAIDetectionOrchestrator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -166,7 +165,7 @@ public class AdminIntakeSessionService {
         
         // In a real implementation, this would:
         // 1. Get original image URLs from metadata
-        // 2. Call HybridAIDetectionOrchestrator
+        // 2. Call AIDetectionService
         // 3. Stream logs via SSE
         // 4. Update session with new results
     }
@@ -380,9 +379,9 @@ public class AdminIntakeSessionService {
         if (user != null) {
             customerInfo = CustomerInfo.builder()
                     .customerId(user.getUserId())
-                    .customerName(user.getFullName() != null ? user.getFullName() : user.getEmail())
+                    .customerName(user.getEmail()) // Use email as name
                     .customerEmail(user.getEmail())
-                    .customerAvatar(null) // TODO: Get avatar from user profile
+                    .customerAvatar(null) 
                     .build();
         }
 

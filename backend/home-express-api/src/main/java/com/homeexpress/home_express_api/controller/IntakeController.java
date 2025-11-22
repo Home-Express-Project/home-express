@@ -11,8 +11,8 @@ import com.homeexpress.home_express_api.dto.intake.IntakeParseTextRequest;
 import com.homeexpress.home_express_api.dto.intake.IntakeParseTextResponse;
 import com.homeexpress.home_express_api.dto.intake.ItemCandidateDto;
 import com.homeexpress.home_express_api.dto.intake.ItemCandidateDto.DimensionsDto;
-import com.homeexpress.home_express_api.service.ai.HybridAIDetectionOrchestrator;
-import com.homeexpress.home_express_api.service.intake.IntakeOcrService;
+import com.homeexpress.home_express_api.service.ai.AIDetectionService;
+// import com.homeexpress.home_express_api.service.intake.IntakeOcrService;
 import com.homeexpress.home_express_api.service.intake.IntakeSessionService;
 import com.homeexpress.home_express_api.service.intake.IntakeTextParsingService;
 import com.homeexpress.home_express_api.service.intake.IntakeAIParsingService;
@@ -51,8 +51,8 @@ public class IntakeController {
 
     private static final Logger logger = LoggerFactory.getLogger(IntakeController.class);
 
-    private final HybridAIDetectionOrchestrator detectionOrchestrator;
-    private final IntakeOcrService intakeOcrService;
+    private final AIDetectionService detectionOrchestrator;
+    // private final IntakeOcrService intakeOcrService;
     private final IntakeTextParsingService textParsingService;
     private final IntakeAIParsingService aiParsingService;
     private final IntakeSessionService sessionService;
@@ -214,7 +214,7 @@ public class IntakeController {
                 .mapToObj(index -> convertToDataUri(images.get(index)))
                 .collect(Collectors.toList());
 
-            DetectionResult detectionResult = detectionOrchestrator.detectItemsHybrid(imageDataUris);
+            DetectionResult detectionResult = detectionOrchestrator.detectItems(imageDataUris);
             List<ItemCandidateDto> candidates = mapDetectionResult(detectionResult);
             
             // Post-process: aggregate similar items and normalize names
@@ -309,40 +309,11 @@ public class IntakeController {
      */
     @PostMapping(value = "/ocr", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> processOcr(@RequestParam("images") MultipartFile[] images) {
-        if (images == null || images.length == 0) {
-            return ResponseEntity.badRequest()
-                .body(Map.of(
-                    "success", false,
-                    "error", "At least one image is required for OCR processing"
-                ));
-        }
-
-        try {
-            List<MultipartFile> validImages = Arrays.stream(images)
-                .filter(Objects::nonNull)
-                .filter(image -> !image.isEmpty())
-                .toList();
-
-            if (validImages.isEmpty()) {
-                return ResponseEntity.badRequest()
-                    .body(Map.of(
-                        "success", false,
-                        "error", "Uploaded images are empty or invalid"
-                    ));
-            }
-
-            logger.info("Processing OCR for {} intake images", validImages.size());
-
-            IntakeOcrResponse response = intakeOcrService.processOcrImages(validImages);
-            return ResponseEntity.ok(response);
-        } catch (Exception ex) {
-            logger.error("Failed to process OCR images: {}", ex.getMessage(), ex);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of(
-                    "success", false,
-                    "error", "Failed to process OCR images"
-                ));
-        }
+        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED)
+            .body(Map.of(
+                "success", false,
+                "error", "OCR service is currently disabled"
+            ));
     }
     
     private DocumentParseResult parseDocumentCandidates(MultipartFile document) {

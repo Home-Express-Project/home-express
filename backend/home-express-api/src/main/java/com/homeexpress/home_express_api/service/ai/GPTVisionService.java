@@ -26,12 +26,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * OpenAI Vision API Service (GPT-5 mini / gpt-5-mini)
- *
- * Uses OpenAI Vision API for image analysis with enhanced detection prompt.
- * Supports gpt-5-mini and other vision-capable models.
+ * Service cốt lõi kết nối với OpenAI Vision (GPT-4 Vision / GPT-5 mini).
+ * Nhiệm vụ: Gửi ảnh lên OpenAI và nhận về danh sách đồ vật dưới dạng JSON.
  */
 @Slf4j
+@Service
 @RequiredArgsConstructor
 public class GPTVisionService {
 
@@ -54,6 +53,7 @@ public class GPTVisionService {
 
     private RestTemplate restTemplate;
 
+    // Khởi tạo RestTemplate với timeout để tránh treo server nếu OpenAI phản hồi chậm
     private RestTemplate getRestTemplate() {
         if (restTemplate == null) {
             SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -65,31 +65,34 @@ public class GPTVisionService {
     }
 
     /**
-     * Detect items using OpenAI Vision API
+     * Hàm chính: Gửi danh sách ảnh lên OpenAI để phân tích.
      *
-     * @param imageUrls List of image URLs to analyze
-     * @return DetectionResult with enhanced detection
-     * @throws AIServiceException if detection fails
+     * @param imageUrls Danh sách link ảnh
+     * @return Kết quả phân tích (Danh sách đồ vật + thông số chi tiết)
      */
     public DetectionResult detectItems(List<String> imageUrls) {
-        log.info("🚀 OpenAI Vision ({}): Processing {} images", openaiModel, imageUrls.size());
+        log.info("🚀 Bắt đầu gọi OpenAI Vision (Model: {}): Xử lý {} ảnh", openaiModel, imageUrls.size());
 
+        // Nếu chưa cấu hình Key thì chạy chế độ giả lập (Stub) để test
         if (openaiApiKey == null || openaiApiKey.isBlank()) {
-            log.warn("⚠ OpenAI API key not configured - using stub implementation");
+            log.warn("⚠ Chưa có OpenAI API Key - Chạy chế độ giả lập (Stub)");
             return detectItemsStub(imageUrls);
         }
 
         try {
             List<EnhancedDetectedItem> enhancedItems = new ArrayList<>();
 
+            // Duyệt từng ảnh và gửi đi phân tích
             for (int i = 0; i < imageUrls.size(); i++) {
                 String imageUrl = imageUrls.get(i);
                 List<EnhancedDetectedItem> items = analyzeImage(imageUrl, i);
                 enhancedItems.addAll(items);
             }
 
+            // Chuyển đổi sang dạng cơ bản để trả về
             List<DetectedItem> basicItems = toBasicItems(enhancedItems);
 
+            // Tính độ tin cậy trung bình
             double avgConfidence = enhancedItems.stream()
                     .map(EnhancedDetectedItem::getConfidence)
                     .filter(conf -> conf != null && conf >= 0)
@@ -97,7 +100,7 @@ public class GPTVisionService {
                     .average()
                     .orElse(0.92);
 
-            log.info("✓ OpenAI Vision detected {} items - Average confidence: {:.2f}%",
+            log.info("✓ OpenAI Vision hoàn tất: Tìm thấy {} món - Độ tin cậy: {:.2f}%",
                     basicItems.size(), avgConfidence * 100);
 
             return DetectionResult.builder()
@@ -109,12 +112,13 @@ public class GPTVisionService {
                     .build();
 
         } catch (Exception e) {
-            log.error("✗ OpenAI Vision API error: {}", e.getMessage(), e);
+            log.error("✗ Lỗi khi gọi OpenAI Vision: {}", e.getMessage(), e);
             throw new AIServiceException("OPENAI_VISION", "DETECTION_FAILED",
-                    "Failed to analyze images: " + e.getMessage());
+                    "Lỗi phân tích ảnh: " + e.getMessage());
         }
     }
 
+    // Phân tích một bức ảnh cụ thể
     private List<EnhancedDetectedItem> analyzeImage(String imageUrl, int imageIndex) {
         try {
             RestTemplate restTemplate = getRestTemplate();
@@ -123,28 +127,28 @@ public class GPTVisionService {
                     ? AIPrompts.ENHANCED_DETECTION_PROMPT
                     : AIPrompts.DETECTION_PROMPT;
 
-            // Extract base64 and MIME type from image input (URL or data URI)
+            // Xử lý ảnh đầu vào (URL hoặc Base64)
             String base64Image;
             String imageMimeType;
 
             if (imageUrl != null && imageUrl.startsWith("data:image/")) {
-                // Already a data URI - extract base64 and MIME type
+                // Nếu là Data URI (ảnh upload trực tiếp)
                 int commaIndex = imageUrl.indexOf(',');
                 if (commaIndex != -1) {
-                    String mimePart = imageUrl.substring(5, commaIndex); // "data:image/jpeg;base64" -> "image/jpeg;base64"
+                    String mimePart = imageUrl.substring(5, commaIndex);
                     int semicolonIndex = mimePart.indexOf(';');
                     imageMimeType = semicolonIndex != -1 ? mimePart.substring(0, semicolonIndex) : mimePart;
                     base64Image = imageUrl.substring(commaIndex + 1);
                 } else {
-                    throw new RuntimeException("Invalid data URI format: " + imageUrl);
+                    throw new RuntimeException("Định dạng ảnh không hợp lệ: " + imageUrl);
                 }
             } else {
-                // Regular URL - fetch and convert to base64
+                // Nếu là URL thường -> Tải về và chuyển sang Base64
                 base64Image = fetchImageAsBase64(imageUrl);
-                imageMimeType = "image/jpeg"; // Default, could be detected from URL
+                imageMimeType = "image/jpeg"; // Mặc định là JPEG
             }
 
-            // Build OpenAI Vision API request
+            // Chuẩn bị payload gửi đi (Tuân thủ format của OpenAI Vision API)
             Map<String, Object> textContent = new HashMap<>();
             textContent.put("type", "text");
             textContent.put("text", prompt);
@@ -167,9 +171,9 @@ public class GPTVisionService {
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("model", openaiModel);
             requestBody.put("messages", messages);
-            requestBody.put("temperature", 0.4);
+            requestBody.put("temperature", 0.4); // Độ sáng tạo vừa phải
             requestBody.put("max_tokens", useEnhancedPrompt ? 4096 : 1024);
-            requestBody.put("response_format", Map.of("type", "json_object"));
+            requestBody.put("response_format", Map.of("type", "json_object")); // Bắt buộc trả về JSON
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -181,21 +185,21 @@ public class GPTVisionService {
             ResponseEntity<Map> response = restTemplate.postForEntity(getChatCompletionsUrl(), entity, Map.class);
 
             if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
-                log.warn("OpenAI Vision HTTP error {} for image {}: {}", response.getStatusCode(), imageIndex, response.getBody());
+                log.warn("Lỗi HTTP từ OpenAI {} với ảnh {}: {}", response.getStatusCode(), imageIndex, response.getBody());
                 return Collections.emptyList();
             }
 
             @SuppressWarnings("unchecked")
             Map<String, Object> responseBody = response.getBody();
             if (responseBody.containsKey("error")) {
-                log.error("OpenAI Vision API error for image {}: {}", imageIndex, responseBody.get("error"));
+                log.error("API trả về lỗi với ảnh {}: {}", imageIndex, responseBody.get("error"));
                 return Collections.emptyList();
             }
 
             return parseOpenAIResponse(responseBody, imageIndex);
 
         } catch (Exception e) {
-            log.error("OpenAI Vision analysis failed for image {}: {}", imageIndex, e.getMessage(), e);
+            log.error("Không thể phân tích ảnh {}: {}", imageIndex, e.getMessage(), e);
             return Collections.emptyList();
         }
     }
@@ -220,22 +224,23 @@ public class GPTVisionService {
             }
 
             String cleaned = cleanResponseText(content);
-            log.debug("GPT-4 Vision raw response for image {}: {}", imageIndex, cleaned);
+            log.debug("Kết quả thô từ GPT cho ảnh {}: {}", imageIndex, cleaned);
             return parseJsonItems(cleaned, imageIndex);
 
         } catch (Exception e) {
-            log.error("Failed to parse OpenAI response: {}", e.getMessage(), e);
+            log.error("Lỗi khi đọc phản hồi từ OpenAI: {}", e.getMessage(), e);
             return Collections.emptyList();
         }
     }
 
+    // Phân tích chuỗi JSON trả về thành danh sách Object
     private List<EnhancedDetectedItem> parseJsonItems(String jsonText, int imageIndex) {
         if (jsonText == null || jsonText.isBlank()) {
             return Collections.emptyList();
         }
 
         try {
-            // Try to parse as JSON object with items array first
+            // Thử parse theo dạng Object có chứa mảng items: { "items": [...] }
             @SuppressWarnings("unchecked")
             Map<String, Object> jsonObject = objectMapper.readValue(jsonText, Map.class);
             Object itemsObj = jsonObject.get("items");
@@ -253,7 +258,7 @@ public class GPTVisionService {
                 return items;
             }
 
-            // Try parsing as direct array
+            // Thử parse theo dạng mảng trực tiếp: [...]
             List<Map<String, Object>> rawItems = objectMapper.readValue(
                     jsonText,
                     new TypeReference<List<Map<String, Object>>>() {
@@ -269,11 +274,12 @@ public class GPTVisionService {
             return items;
 
         } catch (Exception e) {
-            log.warn("Failed to parse OpenAI JSON response: {}. Trying legacy format.", e.getMessage());
+            log.warn("Lỗi parse JSON chuẩn: {}. Thử dùng format cũ.", e.getMessage());
             return parseLegacyItems(jsonText, imageIndex);
         }
     }
 
+    // Chuyển đổi từng item thô sang Object Java
     @SuppressWarnings("unchecked")
     private EnhancedDetectedItem parseEnhancedItem(Map<String, Object> raw, int imageIndex) {
         try {
@@ -287,7 +293,7 @@ public class GPTVisionService {
             builder.confidence(toDouble(raw.get("confidence"), 0.85));
             builder.imageIndex(imageIndex);
 
-            // Bounding box
+            // Tọa độ khung hình (Bounding box)
             if (raw.get("bbox_norm") instanceof Map) {
                 Map<String, Object> bbox = (Map<String, Object>) raw.get("bbox_norm");
                 EnhancedDetectedItem.BoundingBox boundingBox = EnhancedDetectedItem.BoundingBox.builder()
@@ -299,7 +305,7 @@ public class GPTVisionService {
                 builder.bboxNorm(boundingBox);
             }
 
-            // Dimensions
+            // Kích thước 3 chiều
             if (raw.get("dims_cm") instanceof Map) {
                 Map<String, Object> dims = (Map<String, Object>) raw.get("dims_cm");
                 EnhancedDetectedItem.Dimensions dimensions = EnhancedDetectedItem.Dimensions.builder()
@@ -313,20 +319,20 @@ public class GPTVisionService {
             builder.dimensionsBasis(raw.get("dimensions_basis") instanceof String s ? s : null);
             builder.volumeM3(toDouble(raw.get("volume_m3")));
 
-            // Weight
+            // Cân nặng
             builder.weightModel(raw.get("weight_model") instanceof String s ? s : "house-move-v1");
             builder.weightKg(toDouble(raw.get("weight_kg")));
             builder.weightConfidence(toDouble(raw.get("weight_confidence")));
             builder.weightBasis(raw.get("weight_basis") instanceof String s ? s : null);
 
-            // Handling attributes
+            // Các thuộc tính vận chuyển (Dễ vỡ, cần tháo...)
             builder.fragile(toBoolean(raw.get("fragile")));
             builder.twoPersonLift(toBoolean(raw.get("two_person_lift")));
             builder.stackable(toBoolean(raw.get("stackable")));
             builder.disassemblyRequired(toBoolean(raw.get("disassembly_required")));
             builder.notes(raw.get("notes") instanceof String s ? s : "");
 
-            // Visual properties
+            // Thuộc tính hình ảnh (Màu sắc, vật liệu...)
             builder.occludedFraction(toDouble(raw.get("occluded_fraction")));
             builder.orientation(raw.get("orientation") instanceof String s ? s : null);
             builder.color(raw.get("color") instanceof String s ? s : null);
@@ -337,13 +343,13 @@ public class GPTVisionService {
                 builder.material(materials);
             }
 
-            // Brand & model
+            // Thương hiệu
             builder.brand(raw.get("brand") instanceof String s && !s.isBlank() ? s : null);
             builder.model(raw.get("model") instanceof String s && !s.isBlank() ? s : null);
 
             EnhancedDetectedItem item = builder.build();
 
-            // Calculate volume if dimensions are available
+            // Tự tính thể tích nếu có kích thước mà thiếu thể tích
             if (item.getDimsCm() != null && item.getVolumeM3() == null) {
                 item.setVolumeM3(item.calculateVolume());
             }
@@ -351,7 +357,7 @@ public class GPTVisionService {
             return item;
 
         } catch (Exception e) {
-            log.warn("Failed to parse enhanced item: {}", e.getMessage());
+            log.warn("Lỗi parse chi tiết item: {}", e.getMessage());
             return null;
         }
     }
@@ -387,11 +393,12 @@ public class GPTVisionService {
             }
             return items;
         } catch (Exception e) {
-            log.error("Failed to parse legacy OpenAI response: {}", e.getMessage());
+            log.error("Lỗi parse format cũ: {}", e.getMessage());
             return Collections.emptyList();
         }
     }
 
+    // Bổ sung thông tin mặc định nếu thiếu
     private void enrichEnhancedItems(List<EnhancedDetectedItem> items, int imageIndex) {
         for (int idx = 0; idx < items.size(); idx++) {
             EnhancedDetectedItem item = items.get(idx);
@@ -465,6 +472,7 @@ public class GPTVisionService {
         return null;
     }
 
+    // Làm sạch chuỗi JSON (đôi khi AI thêm ```json ở đầu)
     private String cleanResponseText(String text) {
         String cleaned = text.trim();
         if (cleaned.startsWith("```json")) {
@@ -478,24 +486,23 @@ public class GPTVisionService {
         return cleaned.trim();
     }
 
+    // Tải ảnh từ URL và chuyển sang Base64
     private String fetchImageAsBase64(String imageUrl) {
         try {
             RestTemplate restTemplate = getRestTemplate();
             byte[] imageBytes = restTemplate.getForObject(imageUrl, byte[].class);
             if (imageBytes == null) {
-                throw new RuntimeException("Failed to fetch image: " + imageUrl);
+                throw new RuntimeException("Không tải được ảnh: " + imageUrl);
             }
             return java.util.Base64.getEncoder().encodeToString(imageBytes);
         } catch (Exception e) {
-            log.error("Failed to fetch image {}: {}", imageUrl, e.getMessage());
-            throw new RuntimeException("Cannot fetch image: " + imageUrl, e);
+            log.error("Lỗi tải ảnh {}: {}", imageUrl, e.getMessage());
+            throw new RuntimeException("Không thể tải ảnh: " + imageUrl, e);
         }
     }
 
     /**
-     * Build the full Chat Completions endpoint from the configured base URL.
-     * Allows setting openai.api.url to either a base (e.g. https://api.openai.com/v1)
-     * or the full endpoint (https://api.openai.com/v1/chat/completions).
+     * Xây dựng URL endpoint chuẩn.
      */
     private String getChatCompletionsUrl() {
         String base = (openaiApiUrl != null && !openaiApiUrl.isBlank())
@@ -512,14 +519,15 @@ public class GPTVisionService {
     }
 
     /**
-     * STUB implementation - fallback when API key is not configured
+     * Chế độ giả lập (Stub) - Dùng khi không có API Key.
+     * Trả về dữ liệu mẫu để test giao diện.
      */
     private DetectionResult detectItemsStub(List<String> imageUrls) {
-        log.warn("⚠ Using STUB implementation - OpenAI API key not configured");
+        log.warn("⚠ Đang dùng STUB - Chưa có cấu hình OpenAI API");
 
         List<EnhancedDetectedItem> enhancedItems = new ArrayList<>();
 
-        // Simulate enhanced detection with higher confidence
+        // Giả lập kết quả trả về
         for (int i = 0; i < imageUrls.size(); i++) {
             switch (i % 4) {
                 case 0 -> {
@@ -568,9 +576,6 @@ public class GPTVisionService {
                 .build();
     }
 
-    /**
-     * Check if GPT-4 Vision API is configured
-     */
     public boolean isConfigured() {
         return openaiApiKey != null && !openaiApiKey.isBlank();
     }
